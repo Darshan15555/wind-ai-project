@@ -458,6 +458,61 @@ function updateCoordDisplay() {
   document.getElementById('disp-lng').textContent = turbineLng.toFixed(5);
 }
 
+function getShadowEllipsePixels() {
+  const center = map.latLngToContainerPoint([turbineLat, turbineLng]);
+  const radiusX = shadowRadius();
+  const radiusY = radiusX * 0.62;
+  const pointX = map.latLngToContainerPoint([
+    turbineLat,
+    turbineLng + radiusX / (111320 * Math.cos(turbineLat * Math.PI / 180))
+  ]);
+  const pointY = map.latLngToContainerPoint([
+    turbineLat + radiusY / 111320,
+    turbineLng
+  ]);
+
+  return {
+    cx: center.x,
+    cy: center.y,
+    rx: Math.abs(pointX.x - center.x),
+    ry: Math.abs(pointY.y - center.y)
+  };
+}
+
+function cropShadowRegion(canvas) {
+  const { cx, cy, rx, ry } = getShadowEllipsePixels();
+  const padding = 24;
+  const left = Math.max(0, Math.floor(cx - rx - padding));
+  const top = Math.max(0, Math.floor(cy - ry - padding));
+  const right = Math.min(canvas.width, Math.ceil(cx + rx + padding));
+  const bottom = Math.min(canvas.height, Math.ceil(cy + ry + padding));
+  const width = Math.max(1, right - left);
+  const height = Math.max(1, bottom - top);
+  const output = document.createElement('canvas');
+  output.width = width;
+  output.height = height;
+  const ctx = output.getContext('2d');
+
+  ctx.fillStyle = '#0d1119';
+  ctx.fillRect(0, 0, width, height);
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.ellipse(cx - left, cy - top, rx, ry, 0, 0, Math.PI * 2);
+  ctx.clip();
+  ctx.drawImage(canvas, left, top, width, height, 0, 0, width, height);
+  ctx.restore();
+
+  ctx.strokeStyle = '#f59e0b';
+  ctx.lineWidth = 3;
+  ctx.setLineDash([10, 6]);
+  ctx.beginPath();
+  ctx.ellipse(cx - left, cy - top, rx, ry, 0, 0, Math.PI * 2);
+  ctx.stroke();
+
+  return output;
+}
+
 // ── Analysis ───────────────────────────────────────────────────────────────
 async function runAnalysis() {
   if(!turbineLat || isAnalyzing) return;
@@ -474,7 +529,8 @@ async function runAnalysis() {
         useCORS: true, allowTaint: true, scale: 1,
         backgroundColor: '#0d1119', logging: false
       });
-      imageBase64 = canvas.toDataURL('image/png').split(',')[1];
+      const croppedCanvas = cropShadowRegion(canvas);
+      imageBase64 = croppedCanvas.toDataURL('image/png').split(',')[1];
     } catch(e) {
       console.warn('Screenshot failed, using placeholder:', e);
       // Use a minimal 1x1 pixel if screenshot fails (mock will still work)

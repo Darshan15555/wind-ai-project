@@ -15,6 +15,59 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+ANALYSIS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "building_count": {
+            "type": "object",
+            "properties": {
+                "total": {"type": "integer"},
+                "residential": {"type": "integer"},
+                "commercial": {"type": "integer"},
+            },
+            "required": ["total", "residential", "commercial"],
+        },
+        "density": {
+            "type": "object",
+            "properties": {
+                "score": {"type": "number"},
+                "classification": {"type": "string"},
+            },
+            "required": ["score", "classification"],
+        },
+        "sensitive_locations": {"type": "array", "items": {"type": "string"}},
+        "vegetation_coverage": {"type": "string"},
+        "water_bodies": {"type": "boolean"},
+        "infrastructure_quality": {"type": "string"},
+        "risk_assessment": {
+            "type": "object",
+            "properties": {
+                "level": {"type": "string"},
+                "score": {"type": "integer"},
+                "factors": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["level", "score", "factors"],
+        },
+        "recommendation": {"type": "string"},
+        "action_items": {"type": "array", "items": {"type": "string"}},
+        "affected_population_estimate": {"type": "integer"},
+        "land_use": {"type": "string"},
+    },
+    "required": [
+        "building_count",
+        "density",
+        "sensitive_locations",
+        "vegetation_coverage",
+        "water_bodies",
+        "infrastructure_quality",
+        "risk_assessment",
+        "recommendation",
+        "action_items",
+        "affected_population_estimate",
+        "land_use",
+    ],
+}
+
 app = FastAPI(title="Shadow Flicker Assessment API", version="1.0.0")
 
 
@@ -118,25 +171,80 @@ Guidelines:
 - Risk score: 0-30 = Low, 31-65 = Medium, 66-100 = High
 - Population estimate: total buildings × 3.5 average occupancy
 - Be conservative and precise in counts
+- OVERRIDE: Count a building ONLY if a distinct roofed man-made structure is clearly visible inside the ellipse.
+- OVERRIDE: Do NOT count field boundaries, crop patterns, tree clusters, bushes, shadows, small dark dots, vehicles, roads, or image artifacts as buildings.
+- OVERRIDE: If a possible structure is ambiguous or low-confidence, exclude it.
+- OVERRIDE: If no clear buildings are visible, set total = 0, residential = 0, commercial = 0, sensitive_locations = [], and affected_population_estimate = 0.
+- OVERRIDE: Only report sensitive locations if the image itself clearly shows a specific sensitive facility. Never infer a school, religious building, clinic, playground, or house from nearby settlement patterns alone.
+- OVERRIDE: If the zone is mostly open fields, scrubland, or bare soil, prefer land_use = "Agricultural" or "Barren".
+- OVERRIDE: 0 clear buildings usually means Low risk with score 0-20.
+- OVERRIDE: Prefer undercounting over hallucinating and base every field only on direct visual evidence from the image.
 """
 
 
-@app.post("/analyze", response_model=AnalysisResponse)
-async def analyze_location(request: AnalysisRequest):
-    api_key = os.getenv("OPENAI_API_KEY", "")
+def _extract_json_from_text(raw: str) -> dict:
+    cleaned = raw.strip().replace("```json", "").replace("```", "").strip()
+    return json.loads(cleaned)
+
+
+async def _call_gemini(request: AnalysisRequest) -> dict:
+    api_key = os.getenv("GEMINI_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError("GEMINI_API_KEY missing")
+
+    model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+    timeout = int(os.getenv("ANALYSIS_TIMEOUT_SECONDS", "30"))
+    payload = {
+        "contents": [
+            {
+                "role": "user",
+                "parts": [
+                    {"text": ANALYSIS_PROMPT},
+                    {
+                        "inline_data": {
+                            "mime_type": "image/png",
+                            "data": request.image_base64,
+                        }
+                    },
+                ],
+            }
+        ],
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            "responseSchema": ANALYSIS_SCHEMA,
+        },
+    }
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.post(
+            url,
+            headers={"x-goog-api-key": api_key, "Content-Type": "application/json"},
+            json=payload,
+        )
+
+    if resp.status_code != 200:
+        raise RuntimeError(f"Gemini returned {resp.status_code}: {resp.text}")
+
+    body = resp.json()
+    try:
+        raw = body["candidates"][0]["content"]["parts"][0]["text"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise RuntimeError(f"Gemini response shape unexpected: {exc}") from exc
+
+    try:
+        return _extract_json_from_text(raw)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Gemini JSON parse failed: {exc}") from exc
+
+
+async def _call_openai(request: AnalysisRequest) -> dict:
+    api_key = os.getenv("OPENAI_API_KEY", "").strip()
     if not api_key or api_key.startswith("sk-placeholder"):
-        # Return mock data when no real API key
-        return _mock_analysis(request, "OPENAI_API_KEY missing or placeholder; using mock analysis.")
+        raise RuntimeError("OPENAI_API_KEY missing or placeholder")
 
     model = os.getenv("OPENAI_MODEL", "gpt-4o")
     timeout = int(os.getenv("ANALYSIS_TIMEOUT_SECONDS", "30"))
-
-    # Validate image
-    max_mb = float(os.getenv("MAX_IMAGE_SIZE_MB", "5"))
-    img_bytes = len(request.image_base64) * 3 / 4
-    if img_bytes > max_mb * 1024 * 1024:
-        raise HTTPException(status_code=413, detail=f"Image exceeds {max_mb}MB limit")
-
     payload = {
         "model": model,
         "max_tokens": 1000,
@@ -149,37 +257,62 @@ async def analyze_location(request: AnalysisRequest):
                         "type": "image_url",
                         "image_url": {
                             "url": f"data:image/png;base64,{request.image_base64}",
-                            "detail": "high"
-                        }
-                    }
-                ]
+                            "detail": "high",
+                        },
+                    },
+                ],
             }
-        ]
+        ],
     }
 
-    try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            resp = await client.post(
-                "https://api.openai.com/v1/chat/completions",
-                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-                json=payload
-            )
-    except httpx.HTTPError as exc:
-        return _mock_analysis(request, f"OpenAI request failed: {exc}; using mock analysis.")
-
-    if resp.status_code != 200:
-        return _mock_analysis(
-            request,
-            f"OpenAI returned {resp.status_code}; using mock analysis."
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json=payload,
         )
 
+    if resp.status_code != 200:
+        raise RuntimeError(f"OpenAI returned {resp.status_code}: {resp.text}")
+
+    body = resp.json()
     try:
-        raw = resp.json()["choices"][0]["message"]["content"].strip()
-        # Strip any markdown fences
-        raw = raw.replace("```json", "").replace("```", "").strip()
-        data = json.loads(raw)
-    except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
-        return _mock_analysis(request, f"OpenAI response parse failed: {exc}; using mock analysis.")
+        raw = body["choices"][0]["message"]["content"].strip()
+    except (KeyError, IndexError, TypeError) as exc:
+        raise RuntimeError(f"OpenAI response shape unexpected: {exc}") from exc
+
+    try:
+        return _extract_json_from_text(raw)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"OpenAI JSON parse failed: {exc}") from exc
+
+
+@app.post("/analyze", response_model=AnalysisResponse)
+async def analyze_location(request: AnalysisRequest):
+    provider_errors: list[str] = []
+    data: Optional[dict] = None
+    preferred_provider = os.getenv("VISION_PROVIDER", "gemini").strip().lower()
+
+    # Validate image
+    max_mb = float(os.getenv("MAX_IMAGE_SIZE_MB", "5"))
+    img_bytes = len(request.image_base64) * 3 / 4
+    if img_bytes > max_mb * 1024 * 1024:
+        raise HTTPException(status_code=413, detail=f"Image exceeds {max_mb}MB limit")
+
+    providers = ["gemini", "openai"] if preferred_provider != "openai" else ["openai", "gemini"]
+
+    for provider in providers:
+        try:
+            if provider == "gemini":
+                data = await _call_gemini(request)
+            else:
+                data = await _call_openai(request)
+            break
+        except (httpx.HTTPError, RuntimeError) as exc:
+            provider_errors.append(f"{provider}: {exc}")
+
+    if data is None:
+        return _mock_analysis(request, " | ".join(provider_errors) + "; using mock analysis.")
 
     # Calculate shadow zone area (ellipse: π × a × b, a=850m, b=500m approx)
     import math
