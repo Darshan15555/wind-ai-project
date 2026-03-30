@@ -17,9 +17,19 @@ load_dotenv()
 
 app = FastAPI(title="Shadow Flicker Assessment API", version="1.0.0")
 
+
+def _parse_cors_origins() -> list[str]:
+    """Allow common local frontend origins by default for easier dev setup."""
+    configured = os.getenv(
+        "CORS_ORIGINS",
+        "http://localhost:5173,http://127.0.0.1:5173,null",
+    )
+    origins = [origin.strip() for origin in configured.split(",") if origin.strip()]
+    return origins
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=os.getenv("CORS_ORIGINS", "http://localhost:5173").split(","),
+    allow_origins=_parse_cors_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -116,7 +126,7 @@ async def analyze_location(request: AnalysisRequest):
     api_key = os.getenv("OPENAI_API_KEY", "")
     if not api_key or api_key.startswith("sk-placeholder"):
         # Return mock data when no real API key
-        return _mock_analysis(request)
+        return _mock_analysis(request, "OPENAI_API_KEY missing or placeholder; using mock analysis.")
 
     model = os.getenv("OPENAI_MODEL", "gpt-4o")
     timeout = int(os.getenv("ANALYSIS_TIMEOUT_SECONDS", "30"))
@@ -147,24 +157,29 @@ async def analyze_location(request: AnalysisRequest):
         ]
     }
 
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        resp = await client.post(
-            "https://api.openai.com/v1/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json=payload
-        )
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json=payload
+            )
+    except httpx.HTTPError as exc:
+        return _mock_analysis(request, f"OpenAI request failed: {exc}; using mock analysis.")
 
     if resp.status_code != 200:
-        raise HTTPException(status_code=502, detail=f"OpenAI error: {resp.text}")
-
-    raw = resp.json()["choices"][0]["message"]["content"].strip()
-    # Strip any markdown fences
-    raw = raw.replace("```json", "").replace("```", "").strip()
+        return _mock_analysis(
+            request,
+            f"OpenAI returned {resp.status_code}; using mock analysis."
+        )
 
     try:
+        raw = resp.json()["choices"][0]["message"]["content"].strip()
+        # Strip any markdown fences
+        raw = raw.replace("```json", "").replace("```", "").strip()
         data = json.loads(raw)
-    except json.JSONDecodeError as e:
-        raise HTTPException(status_code=500, detail=f"Failed to parse AI response: {e}")
+    except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
+        return _mock_analysis(request, f"OpenAI response parse failed: {exc}; using mock analysis.")
 
     # Calculate shadow zone area (ellipse: π × a × b, a=850m, b=500m approx)
     import math
@@ -189,7 +204,7 @@ async def analyze_location(request: AnalysisRequest):
     )
 
 
-def _mock_analysis(request: AnalysisRequest) -> AnalysisResponse:
+def _mock_analysis(request: AnalysisRequest, error_message: Optional[str] = None) -> AnalysisResponse:
     """Returns realistic mock data for demo/development purposes."""
     import math, random
     a = request.shadow_radius_m
@@ -242,7 +257,8 @@ def _mock_analysis(request: AnalysisRequest) -> AnalysisResponse:
         affected_population_estimate=int(total * 3.5),
         shadow_zone_area_ha=area_ha,
         land_use=random.choice(["Agricultural", "Residential", "Mixed", "Commercial"]),
-        success=True
+        success=True,
+        error=error_message
     )
 
 
