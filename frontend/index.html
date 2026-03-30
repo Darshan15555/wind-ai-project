@@ -829,6 +829,10 @@ async function runAnalysis() {
     if (!res.ok) throw new Error(`API error: ${res.status}`);
     const rawData = await res.json();
     const data = applyVisualOverrides(rawData, { waterCoverage });
+    if(data.fallback_used) {
+      const providerMsg = data.error || 'Vision provider failed, so fallback data was used.';
+      document.getElementById('status-text').textContent = `Analysis fallback used - ${providerMsg}`;
+    }
 
     // Store in history
     const entry = {
@@ -847,7 +851,9 @@ async function runAnalysis() {
     document.getElementById('export-btn').disabled = false;
 
     renderDashboard(data, entry);
-    document.getElementById('status-text').textContent = `Analysis complete — Risk: ${data.risk_assessment.level}`;
+    if(!data.fallback_used) {
+      document.getElementById('status-text').textContent = `Analysis complete — Risk: ${data.risk_assessment.level}`;
+    }
 
   } catch(err) {
     console.error(err);
@@ -878,6 +884,14 @@ function renderDashboard(d, entry) {
   document.getElementById('dash-empty').style.display = 'none';
   const dc = document.getElementById('dash-content');
   dc.style.display = 'flex';
+
+  const providerBanner = d.fallback_used
+    ? `<div style="background:var(--dangerd);border:1px solid var(--danger);border-radius:var(--radius);padding:12px 14px">
+        <div style="font-size:12px;font-weight:700;color:var(--danger);margin-bottom:4px">Vision Analysis Fallback</div>
+        <div style="font-size:11px;color:var(--text2)">Provider: ${d.provider_used || 'unknown'}</div>
+        <div style="font-size:11px;color:var(--text2);margin-top:4px">${d.error || 'The configured vision provider failed, so this dashboard is showing conservative fallback values rather than real image analysis.'}</div>
+      </div>`
+    : '';
 
   const riskClass = d.risk_assessment.level.toLowerCase();
   const riskColor = riskClass === 'low' ? 'var(--accent)' : riskClass === 'medium' ? 'var(--warn)' : 'var(--danger)';
@@ -921,6 +935,7 @@ function renderDashboard(d, entry) {
   }).join('');
 
   dc.innerHTML = `
+    ${providerBanner}
     <!-- Location info -->
     <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:12px 14px">
       <div class="section-title">Location</div>

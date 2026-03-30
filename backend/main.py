@@ -8,12 +8,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import Optional
 import os
-import base64
 import json
+import math
 import httpx
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(override=True)
 
 ANALYSIS_SCHEMA = {
     "type": "object",
@@ -130,11 +130,20 @@ class AnalysisResponse(BaseModel):
     shadow_zone_area_ha: float
     land_use: str
     success: bool = True
+    provider_used: str = "unknown"
+    fallback_used: bool = False
     error: Optional[str] = None
 
 
 ANALYSIS_PROMPT = """
-You are an expert wind energy environmental impact analyst. You are analyzing a satellite image of a proposed wind turbine location with a shadow flicker zone overlay (an elliptical shaded area).
+You are an expert wind energy environmental impact analyst. You are analyzing a satellite image that shows only the area inside the shadow flicker impact zone for a proposed wind turbine.
+
+Important constraints:
+- The image is already cropped or masked to the ellipse.
+- Analyze only what is visible inside the ellipse.
+- Ignore everything outside the ellipse, including blacked-out regions.
+- Base every field only on direct visual evidence from the image.
+- Do not infer hidden buildings or sensitive sites from nearby context.
 
 Analyze the satellite image carefully and return ONLY a valid JSON object with this EXACT structure (no markdown, no explanation):
 
@@ -172,14 +181,16 @@ Guidelines:
 - Population estimate: total buildings × 3.5 average occupancy
 - Be conservative and precise in counts
 - OVERRIDE: Count a building ONLY if a distinct roofed man-made structure is clearly visible inside the ellipse.
+- OVERRIDE: Include partially visible buildings if any portion lies inside the ellipse.
 - OVERRIDE: Do NOT count field boundaries, crop patterns, tree clusters, bushes, shadows, small dark dots, vehicles, roads, or image artifacts as buildings.
+- OVERRIDE: If many small buildings are tightly clustered in a visible settlement, estimate the count realistically instead of counting only isolated roofs.
 - OVERRIDE: If a possible structure is ambiguous or low-confidence, exclude it.
 - OVERRIDE: If no clear buildings are visible, set total = 0, residential = 0, commercial = 0, sensitive_locations = [], and affected_population_estimate = 0.
 - OVERRIDE: Only report sensitive locations if the image itself clearly shows a specific sensitive facility. Never infer a school, religious building, clinic, playground, or house from nearby settlement patterns alone.
 - OVERRIDE: If the zone is mostly open fields, scrubland, or bare soil, prefer land_use = "Agricultural" or "Barren".
 - OVERRIDE: 0 clear buildings usually means Low risk with score 0-20.
-- OVERRIDE: Prefer undercounting over hallucinating and base every field only on direct visual evidence from the image.
-- OVERRIDE: In sparse rural scenes, stay conservative and prefer lower counts when structures are ambiguous.
+- OVERRIDE: Base every field only on direct visual evidence from the image.
+- OVERRIDE: In sparse rural scenes, stay conservative when structures are ambiguous, but do not undercount clearly visible village clusters.
 - OVERRIDE: In dense urban scenes with continuous rooftops across much of the ellipse, do NOT undercount by trying to enumerate only a few clearly isolated roofs.
 - OVERRIDE: For dense urban scenes, return a realistic estimate of total visible buildings/structures within the ellipse, even if exact counting is impossible.
 - OVERRIDE: If the ellipse covers a dense city-core or tightly packed urban neighborhood, totals may reasonably be in the hundreds or thousands rather than tens.
@@ -191,6 +202,172 @@ Guidelines:
 def _extract_json_from_text(raw: str) -> dict:
     cleaned = raw.strip().replace("```json", "").replace("```", "").strip()
     return json.loads(cleaned)
+
+
+def _clamp(value: float, minimum: float, maximum: float) -> float:
+    return max(minimum, min(maximum, value))
+
+
+def _refresh_env() -> None:
+    """Reload .env so API key/account switches are picked up without stale process state."""
+    load_dotenv(override=True)
+
+
+def _summarize_provider_error(provider: str, exc: Exception) -> str:
+    text = str(exc)
+    lowered = text.lower()
+
+    if "429" in text and ("quota" in lowered or "resource_exhausted" in lowered or "insufficient_quota" in lowered):
+        return f"{provider} quota exceeded"
+    if "api_key" in lowered and ("missing" in lowered or "invalid" in lowered or "placeholder" in lowered):
+        return f"{provider} API key missing or invalid"
+    if "json parse failed" in lowered:
+        return f"{provider} returned an unreadable response"
+    if "timed out" in lowered or "timeout" in lowered:
+        return f"{provider} request timed out"
+    return f"{provider} request failed"
+
+
+def _normalize_analysis(data: dict) -> dict:
+    """Sanity-check model output so the dashboard does not show inconsistent results."""
+    building_count = data.get("building_count") or {}
+    total = max(0, int(round(building_count.get("total", 0))))
+    residential = max(0, int(round(building_count.get("residential", 0))))
+    commercial = max(0, int(round(building_count.get("commercial", 0))))
+
+    known_total = residential + commercial
+    if known_total > total:
+        total = known_total
+
+    if total == 0:
+        residential = 0
+        commercial = 0
+    elif known_total == 0:
+        residential = max(total - 1, 0)
+        commercial = total - residential
+
+    density = data.get("density") or {}
+    density_score = round(_clamp(float(density.get("score", 1)), 1, 10), 1)
+    classification = str(density.get("classification", "")).title()
+    if classification not in {"Rural", "Suburban", "Urban"}:
+        classification = "Rural" if density_score < 3 else ("Suburban" if density_score < 6.5 else "Urban")
+
+    if total == 0:
+        density_score = 1.0
+    elif total <= 12:
+        density_score = max(density_score, 2.0)
+    elif total <= 40:
+        density_score = max(density_score, 3.0)
+    elif total <= 120:
+        density_score = max(density_score, 4.0)
+    elif total <= 300:
+        density_score = max(density_score, 6.0)
+    else:
+        density_score = max(density_score, 8.0)
+
+    if classification == "Rural":
+        density_score = min(density_score, 4.9)
+    elif classification == "Suburban":
+        density_score = _clamp(density_score, 3.0, 7.4)
+    else:
+        density_score = max(density_score, 7.0)
+
+    density_score = round(_clamp(density_score, 1, 10), 1)
+    classification = "Rural" if density_score < 3 else ("Suburban" if density_score < 6.5 else "Urban")
+
+    sensitive_locations = [str(item).strip() for item in data.get("sensitive_locations", []) if str(item).strip()]
+
+    vegetation = str(data.get("vegetation_coverage", "Moderate")).title()
+    if vegetation == "Medium":
+        vegetation = "Moderate"
+    if vegetation not in {"Low", "Moderate", "High"}:
+        vegetation = "Moderate"
+
+    water_bodies = bool(data.get("water_bodies", False))
+
+    infrastructure_quality = str(data.get("infrastructure_quality", "Fair")).title()
+    if infrastructure_quality not in {"Poor", "Fair", "Good"}:
+        infrastructure_quality = "Fair"
+
+    land_use = str(data.get("land_use", "Mixed")).title()
+    if land_use not in {"Agricultural", "Residential", "Commercial", "Mixed", "Industrial", "Forest", "Barren"}:
+        land_use = "Mixed"
+
+    affected_population_estimate = int(round(data.get("affected_population_estimate", total * 3.5)))
+    if total == 0:
+        affected_population_estimate = 0
+    elif affected_population_estimate < int(total * 2):
+        affected_population_estimate = int(round(total * 3.5))
+
+    risk_score = 5
+    risk_score += min(total * 0.75, 45)
+    risk_score += (density_score - 1) * 4
+    risk_score += min(len(sensitive_locations) * 12, 24)
+    if water_bodies:
+        risk_score += 4
+    if land_use in {"Residential", "Commercial", "Industrial"}:
+        risk_score += 6
+    elif land_use == "Mixed":
+        risk_score += 3
+
+    risk_score = int(round(_clamp(risk_score, 0, 100)))
+    if classification == "Rural":
+        risk_score = min(risk_score, 65)
+    if total == 0:
+        risk_score = min(risk_score, 20)
+
+    risk_level = "Low" if risk_score < 31 else ("Medium" if risk_score < 66 else "High")
+
+    factors = [str(item).strip() for item in (data.get("risk_assessment") or {}).get("factors", []) if str(item).strip()]
+    if not factors:
+        factors = [
+            f"{classification} area with approximately {total} visible structures",
+            "Assessment uses only features visible inside the ellipse",
+            "Site verification is recommended before final setback decisions",
+        ]
+
+    recommendation = str(data.get("recommendation", "")).strip()
+    if not recommendation:
+        recommendation = (
+            "Proceed with standard verification, as the visible impact zone appears lightly developed."
+            if risk_level == "Low" else
+            "Verify all visible dwellings in the ellipse before finalizing shadow flicker mitigation and setback compliance."
+            if risk_level == "Medium" else
+            "High visible exposure is indicated; review turbine placement and require a detailed shadow flicker mitigation plan."
+        )
+
+    action_items = [str(item).strip() for item in data.get("action_items", []) if str(item).strip()]
+    if len(action_items) < 2:
+        action_items = [
+            "Validate visible building count with higher-resolution imagery",
+            "Confirm any sensitive buildings before final siting approval",
+            "Re-run shadow flicker compliance using verified structures",
+        ]
+
+    return {
+        "building_count": {
+            "total": total,
+            "residential": residential,
+            "commercial": commercial,
+        },
+        "density": {
+            "score": density_score,
+            "classification": classification,
+        },
+        "sensitive_locations": sensitive_locations,
+        "vegetation_coverage": vegetation,
+        "water_bodies": water_bodies,
+        "infrastructure_quality": infrastructure_quality,
+        "risk_assessment": {
+            "level": risk_level,
+            "score": risk_score,
+            "factors": factors[:5],
+        },
+        "recommendation": recommendation,
+        "action_items": action_items[:4],
+        "affected_population_estimate": affected_population_estimate,
+        "land_use": land_use,
+    }
 
 
 async def _call_gemini(request: AnalysisRequest) -> dict:
@@ -295,9 +472,11 @@ async def _call_openai(request: AnalysisRequest) -> dict:
 
 @app.post("/analyze", response_model=AnalysisResponse)
 async def analyze_location(request: AnalysisRequest):
+    _refresh_env()
     provider_errors: list[str] = []
     data: Optional[dict] = None
     preferred_provider = os.getenv("VISION_PROVIDER", "gemini").strip().lower()
+    provider_used = "unknown"
 
     # Validate image
     max_mb = float(os.getenv("MAX_IMAGE_SIZE_MB", "5"))
@@ -313,15 +492,17 @@ async def analyze_location(request: AnalysisRequest):
                 data = await _call_gemini(request)
             else:
                 data = await _call_openai(request)
+            provider_used = provider
             break
         except (httpx.HTTPError, RuntimeError) as exc:
-            provider_errors.append(f"{provider}: {exc}")
+            provider_errors.append(_summarize_provider_error(provider, exc))
 
     if data is None:
-        return _mock_analysis(request, " | ".join(provider_errors) + "; using mock analysis.")
+        return _mock_analysis(request, ", ".join(provider_errors) + "; using conservative fallback analysis.")
+
+    data = _normalize_analysis(data)
 
     # Calculate shadow zone area (ellipse: π × a × b, a=850m, b=500m approx)
-    import math
     a = request.shadow_radius_m
     b = a * 0.58
     area_ha = round(math.pi * a * b / 10000, 1)
@@ -339,64 +520,69 @@ async def analyze_location(request: AnalysisRequest):
         affected_population_estimate=data.get("affected_population_estimate", 0),
         shadow_zone_area_ha=area_ha,
         land_use=data.get("land_use", "Mixed"),
-        success=True
+        success=True,
+        provider_used=provider_used,
+        fallback_used=False,
+        error=None,
     )
 
 
 def _mock_analysis(request: AnalysisRequest, error_message: Optional[str] = None) -> AnalysisResponse:
-    """Returns realistic mock data for demo/development purposes."""
-    import math, random
+    """Returns conservative deterministic fallback data when vision providers are unavailable."""
     a = request.shadow_radius_m
     b = a * 0.58
     area_ha = round(math.pi * a * b / 10000, 1)
-
-    total = random.randint(8, 72)
-    residential = int(total * 0.82)
-    commercial = total - residential
-
-    score = random.randint(20, 85)
-    level = "Low" if score < 31 else ("Medium" if score < 66 else "High")
-    density_score = round(random.uniform(1.5, 8.5), 1)
-    classification = "Rural" if density_score < 3 else ("Suburban" if density_score < 6.5 else "Urban")
+    fallback = _normalize_analysis(
+        {
+            "building_count": {
+                "total": 0,
+                "residential": 0,
+                "commercial": 0,
+            },
+            "density": {
+                "score": 1,
+                "classification": "Rural",
+            },
+            "sensitive_locations": [],
+            "vegetation_coverage": "Moderate",
+            "water_bodies": False,
+            "infrastructure_quality": "Fair",
+            "risk_assessment": {
+                "level": "Low",
+                "score": 10,
+                "factors": [
+                    "Vision provider unavailable, so no reliable structure count was produced",
+                    "Fallback result is intentionally conservative",
+                    "A fresh analysis should be run once the model connection is restored",
+                ],
+            },
+            "recommendation": "Vision analysis is unavailable. Re-run the assessment with the AI provider enabled before using the result for planning decisions.",
+            "action_items": [
+                "Restore the configured vision API connection",
+                "Re-run the image analysis",
+                "Validate the returned building count before acting on the risk score",
+            ],
+            "affected_population_estimate": 0,
+            "land_use": "Mixed",
+        }
+    )
 
     return AnalysisResponse(
-        building_count=BuildingCount(total=total, residential=residential, commercial=commercial),
-        density=DensityInfo(score=density_score, classification=classification),
-        sensitive_locations=random.choice([
-            ["Primary school ~320m NE", "Health clinic ~480m SE"],
-            ["Religious building ~200m W"],
-            [],
-            ["Community hall ~150m N", "Kindergarten ~400m NW"]
-        ]),
-        vegetation_coverage=random.choice(["Low", "Moderate", "High"]),
-        water_bodies=random.choice([True, False]),
-        infrastructure_quality=random.choice(["Poor", "Fair", "Good"]),
-        risk_assessment=RiskAssessment(
-            level=level,
-            score=score,
-            factors=[
-                f"{classification} area with {total} structures",
-                "Setback compliance requires verification",
-                "Shadow hours potentially exceeding 30h/year threshold"
-            ]
-        ),
-        recommendation=(
-            "Site appears suitable with standard mitigation measures. "
-            "Automated shadow curtailment system strongly recommended."
-            if score < 50 else
-            "High sensitivity detected. Increase turbine setback to minimum 700m. "
-            "Full environmental impact assessment required before proceeding."
-        ),
-        action_items=[
-            "Commission detailed shadow flicker study (IEC 61400-11)",
-            "Notify affected residents within 500m radius",
-            "Install automated curtailment if >30h/year limit exceeded",
-            "Consult local planning authority for noise & visual impact"
-        ],
-        affected_population_estimate=int(total * 3.5),
+        building_count=BuildingCount(**fallback["building_count"]),
+        density=DensityInfo(**fallback["density"]),
+        sensitive_locations=fallback["sensitive_locations"],
+        vegetation_coverage=fallback["vegetation_coverage"],
+        water_bodies=fallback["water_bodies"],
+        infrastructure_quality=fallback["infrastructure_quality"],
+        risk_assessment=RiskAssessment(**fallback["risk_assessment"]),
+        recommendation=fallback["recommendation"],
+        action_items=fallback["action_items"],
+        affected_population_estimate=fallback["affected_population_estimate"],
         shadow_zone_area_ha=area_ha,
-        land_use=random.choice(["Agricultural", "Residential", "Mixed", "Commercial"]),
-        success=True,
+        land_use=fallback["land_use"],
+        success=False,
+        provider_used="fallback",
+        fallback_used=True,
         error=error_message
     )
 
