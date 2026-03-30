@@ -277,6 +277,37 @@
   .leaflet-popup-tip{background:var(--surface)!important}
   .leaflet-popup-content{color:var(--text)!important;font-family:var(--sans)!important;font-size:13px!important}
   .leaflet-control-zoom a{background:var(--surface)!important;border-color:var(--border)!important;color:var(--text)!important}
+
+  .time-panel{
+    flex-shrink:0;background:var(--bg2);border-top:1px solid var(--border);
+    padding:12px 18px 14px;
+  }
+  .time-card{
+    max-width:720px;margin:0 auto;
+    background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
+    padding:12px 16px;
+  }
+  .time-card-header{
+    display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px;
+  }
+  .time-card-title{
+    font-size:11px;font-family:var(--mono);text-transform:uppercase;letter-spacing:.08em;color:var(--text3);
+  }
+  .time-card-value{
+    font-size:13px;font-family:var(--mono);color:var(--accent);font-weight:700;
+  }
+  .time-scale{
+    display:flex;justify-content:space-between;margin-top:8px;
+    font-size:10px;font-family:var(--mono);color:var(--text3);
+  }
+  .time-slider-wrap{position:relative;padding-top:20px}
+  .time-bubble{
+    position:absolute;top:0;left:0;transform:translateX(-50%);
+    font-size:11px;font-family:var(--mono);font-weight:700;
+    color:#001a14;background:var(--accent);border-radius:999px;
+    padding:4px 8px;white-space:nowrap;pointer-events:none;
+    box-shadow:0 6px 18px rgba(79,217,179,.2);
+  }
 </style>
 </head>
 <body>
@@ -319,7 +350,7 @@
             </div>
             <input type="range" id="height-slider" min="80" max="250" value="150" oninput="updateTurbine()"/>
           </div>
-          <div>
+          <div style="display:none">
             <div class="control-row">
               <span class="control-label">Rotor diameter</span>
               <span class="control-val" id="rotor-val">120 m</span>
@@ -365,11 +396,30 @@
   </div>
 </div>
 
+<div class="time-panel">
+  <div class="time-card">
+    <div class="time-card-header">
+      <span class="time-card-title">Shadow Time</span>
+      <span class="time-card-value" id="time-val">12:00 PM</span>
+    </div>
+    <div class="time-slider-wrap">
+      <div class="time-bubble" id="time-bubble">12:00 PM</div>
+      <input type="range" id="time-slider" min="6" max="18" step="0.25" value="12" oninput="updateShadowTime()"/>
+    </div>
+    <div class="time-scale">
+      <span>6:00 AM</span>
+      <span>12:00 PM</span>
+      <span>6:00 PM</span>
+    </div>
+  </div>
+</div>
+
 <script>
 // ── State ──────────────────────────────────────────────────────────────────
 const API = 'http://localhost:8000';
 let map, turbineMarker, shadowEllipse;
 let turbineLat = null, turbineLng = null;
+let shadowHour = 12;
 let isAnalyzing = false;
 let history = JSON.parse(localStorage.getItem('sfa_history') || '[]');
 let analysisCount = history.length;
@@ -425,28 +475,88 @@ function placeTurbine() {
 
 function drawShadowZone() {
   if(shadowEllipse) map.removeLayer(shadowEllipse);
-  const height = parseInt(document.getElementById('height-slider').value);
-  const radius = shadowRadius();
-  // Ellipse: shadow stretches E-W (azimuth), compressed N-S
-  shadowEllipse = L.ellipse([turbineLat, turbineLng], [radius, radius * 0.62], 0, {
+  const { centerLat, centerLng, radiusX, radiusY } = shadowGeometry();
+  const points = buildShadowPolygon(centerLat, centerLng, radiusX, radiusY);
+  shadowEllipse = L.polygon(points, {
     color: '#f59e0b',
     fillColor: '#f59e0b',
     fillOpacity: 0.12,
     weight: 1.5,
     dashArray: '6 4',
-    opacity: 0.8
+    opacity: 0.8,
+    smoothFactor: 1
   }).addTo(map);
 }
 
 function shadowRadius() {
-  const h = parseInt(document.getElementById('height-slider').value);
-  return Math.round(h * 5.5);
+  return Math.round(shadowGeometry().shadowLength);
+}
+
+function shadowGeometry() {
+  const height = parseInt(document.getElementById('height-slider').value);
+  const progress = (shadowHour - 6) / 12;
+  const daylightArc = Math.sin(Math.PI * progress);
+  const easedArc = daylightArc * daylightArc * (3 - 2 * daylightArc);
+  const sunElevationDeg = 12 + 58 * easedArc;
+  const sunElevationRad = sunElevationDeg * Math.PI / 180;
+  const shadowLength = Math.max(20, height / Math.tan(sunElevationRad));
+  const radiusX = Math.max(30, shadowLength * 0.8);
+  const radiusY = Math.max(20, shadowLength * 0.3);
+  const direction = (shadowHour - 12) / 6;
+  const edgeBias = Math.abs(direction);
+  const offsetMeters = direction * radiusX * (0.1 + edgeBias * 0.9);
+  const lngOffset = offsetMeters / (111320 * Math.cos(turbineLat * Math.PI / 180));
+
+  return {
+    centerLat: turbineLat,
+    centerLng: turbineLng + lngOffset,
+    shadowLength,
+    sunElevationDeg,
+    radiusX,
+    radiusY
+  };
+}
+
+function buildShadowPolygon(centerLat, centerLng, radiusX, radiusY) {
+  const points = [];
+  const cosLat = Math.cos(centerLat * Math.PI / 180);
+  for(let i = 0; i < 72; i++) {
+    const theta = (i / 72) * Math.PI * 2;
+    const dx = Math.cos(theta) * radiusX;
+    const dy = Math.sin(theta) * radiusY;
+    const lat = centerLat + (dy / 111320);
+    const lng = centerLng + (dx / (111320 * cosLat));
+    points.push([lat, lng]);
+  }
+  return points;
+}
+
+function formatShadowTime(hour) {
+  const whole = Math.floor(hour);
+  const minutes = Math.round((hour - whole) * 60);
+  const suffix = whole >= 12 ? 'PM' : 'AM';
+  const displayHour = ((whole + 11) % 12) + 1;
+  return `${displayHour}:${String(minutes).padStart(2, '0')} ${suffix}`;
+}
+
+function updateShadowTime() {
+  const slider = document.getElementById('time-slider');
+  const bubble = document.getElementById('time-bubble');
+  shadowHour = parseFloat(slider.value);
+  const label = formatShadowTime(shadowHour);
+  document.getElementById('time-val').textContent = label;
+  bubble.textContent = label;
+  const min = parseFloat(slider.min);
+  const max = parseFloat(slider.max);
+  const percent = ((shadowHour - min) / (max - min)) * 100;
+  bubble.style.left = `calc(${percent}% + ${(0.5 - percent / 100) * 16}px)`;
+  if(turbineLat) drawShadowZone();
 }
 
 function updateTurbine() {
   const h = document.getElementById('height-slider').value;
   const r = document.getElementById('rotor-slider').value;
-  const rad = Math.round(h * 5.5);
+  const rad = shadowRadius();
   document.getElementById('height-val').textContent = h + ' m';
   document.getElementById('rotor-val').textContent = r + ' m';
   document.getElementById('radius-val').textContent = '~' + rad + ' m';
@@ -459,16 +569,15 @@ function updateCoordDisplay() {
 }
 
 function getShadowEllipsePixels() {
-  const center = map.latLngToContainerPoint([turbineLat, turbineLng]);
-  const radiusX = shadowRadius();
-  const radiusY = radiusX * 0.62;
+  const { centerLat, centerLng, radiusX, radiusY } = shadowGeometry();
+  const center = map.latLngToContainerPoint([centerLat, centerLng]);
   const pointX = map.latLngToContainerPoint([
-    turbineLat,
-    turbineLng + radiusX / (111320 * Math.cos(turbineLat * Math.PI / 180))
+    centerLat,
+    centerLng + radiusX / (111320 * Math.cos(centerLat * Math.PI / 180))
   ]);
   const pointY = map.latLngToContainerPoint([
-    turbineLat + radiusY / 111320,
-    turbineLng
+    centerLat + radiusY / 111320,
+    centerLng
   ]);
 
   return {
@@ -513,6 +622,84 @@ function cropShadowRegion(canvas) {
   return output;
 }
 
+function detectWaterCoverage(canvas) {
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  const { width, height } = canvas;
+  if(!ctx || width < 4 || height < 4) return 0;
+
+  const sample = ctx.getImageData(0, 0, width, height).data;
+  let waterLike = 0;
+  let opaque = 0;
+
+  for(let i = 0; i < sample.length; i += 16) {
+    const r = sample[i];
+    const g = sample[i + 1];
+    const b = sample[i + 2];
+    const a = sample[i + 3];
+    if(a < 20) continue;
+    opaque++;
+    const max = Math.max(r, g, b);
+    const min = Math.min(r, g, b);
+    const saturation = max === 0 ? 0 : (max - min) / max;
+    const strongBlue = b > g + 12 && g > r && b > 70 && saturation > 0.18;
+    const cyanBlue = b > 95 && g > 70 && r < 95 && saturation > 0.16;
+    if(strongBlue || cyanBlue) waterLike++;
+  }
+
+  return opaque > 0 ? (waterLike / opaque) : 0;
+}
+
+function applyVisualOverrides(data, context) {
+  const result = JSON.parse(JSON.stringify(data));
+  if(context.waterCoverage > 0.55) {
+    result.water_bodies = true;
+    result.land_use = 'Barren';
+    if(result.building_count.total === 0) {
+      result.risk_assessment.level = 'Low';
+      result.risk_assessment.score = Math.min(result.risk_assessment.score, 10);
+      result.risk_assessment.factors = [
+        'Open water dominates the shadow flicker zone',
+        'No visible structures in the selected area',
+        'Minimal onshore receptor exposure'
+      ];
+      result.recommendation = 'Review marine and coastal environmental constraints before proceeding.';
+    }
+  } else if(context.waterCoverage < 0.08) {
+    result.water_bodies = false;
+  }
+
+  const buildingTotal = result.building_count?.total || 0;
+  const densityScore = result.density?.score || 0;
+  const densityClass = (result.density?.classification || '').toLowerCase();
+  const sensitiveCount = result.sensitive_locations?.length || 0;
+
+  // In obvious city-core scenarios, don't let the model understate the final score.
+  if (
+    buildingTotal >= 700 ||
+    (densityClass === 'urban' && densityScore >= 9 && buildingTotal >= 400)
+  ) {
+    result.risk_assessment.level = 'High';
+    result.risk_assessment.score = 100;
+    result.risk_assessment.factors = [
+      'Extreme urban population density within the shadow flicker zone',
+      'Very high concentration of residential and mixed-use structures',
+      'Unacceptable shadow flicker exposure for a city-core location'
+    ];
+    result.recommendation = 'This location is unsuitable for turbine placement due to severe urban shadow flicker exposure.';
+    if(sensitiveCount === 0) {
+      result.sensitive_locations = ['Dense urban receptors throughout the zone'];
+    }
+  } else if (
+    buildingTotal >= 300 ||
+    (densityClass === 'urban' && densityScore >= 8)
+  ) {
+    result.risk_assessment.level = 'High';
+    result.risk_assessment.score = Math.max(result.risk_assessment.score, 95);
+  }
+
+  return result;
+}
+
 // ── Analysis ───────────────────────────────────────────────────────────────
 async function runAnalysis() {
   if(!turbineLat || isAnalyzing) return;
@@ -523,6 +710,7 @@ async function runAnalysis() {
   try {
     // Capture map screenshot
     let imageBase64 = null;
+    let waterCoverage = 0;
     try {
       const mapEl = document.getElementById('map');
       const canvas = await html2canvas(mapEl, {
@@ -530,6 +718,7 @@ async function runAnalysis() {
         backgroundColor: '#0d1119', logging: false
       });
       const croppedCanvas = cropShadowRegion(canvas);
+      waterCoverage = detectWaterCoverage(croppedCanvas);
       imageBase64 = croppedCanvas.toDataURL('image/png').split(',')[1];
     } catch(e) {
       console.warn('Screenshot failed, using placeholder:', e);
@@ -557,7 +746,8 @@ async function runAnalysis() {
     });
 
     if (!res.ok) throw new Error(`API error: ${res.status}`);
-    const data = await res.json();
+    const rawData = await res.json();
+    const data = applyVisualOverrides(rawData, { waterCoverage });
 
     // Store in history
     const entry = {
@@ -657,7 +847,6 @@ function renderDashboard(d, entry) {
         <div style="font-size:11px;color:var(--text2)">Lat <span style="font-family:var(--mono);color:var(--text)">${entry.lat.toFixed(5)}</span></div>
         <div style="font-size:11px;color:var(--text2)">Lng <span style="font-family:var(--mono);color:var(--text)">${entry.lng.toFixed(5)}</span></div>
         <div style="font-size:11px;color:var(--text2)">Height <span style="font-family:var(--mono);color:var(--text)">${entry.height}m</span></div>
-        <div style="font-size:11px;color:var(--text2)">Rotor <span style="font-family:var(--mono);color:var(--text)">${entry.rotor}m</span></div>
         <div style="font-size:11px;color:var(--text2)">Land use <span style="font-family:var(--mono);color:var(--accent)">${d.land_use}</span></div>
       </div>
     </div>
@@ -863,6 +1052,13 @@ L.Ellipse = L.Circle.extend({
     this.options.interactive && path.classList.add('leaflet-interactive');
     this._renderer._layers[L.stamp(this)] = this;
     this._renderer._container.appendChild(path);
+  },
+  _removePath() {
+    if (this._path && this._path.parentNode) {
+      this._path.parentNode.removeChild(this._path);
+    }
+    delete this._renderer._layers[L.stamp(this)];
+    this._path = null;
   }
 });
 
@@ -870,6 +1066,7 @@ L.ellipse = (latlng, radii, tilt, opts) => new L.Ellipse(latlng, radii, tilt, op
 
 // Init turbine spec display
 updateTurbine();
+updateShadowTime();
 
 // Restore last history if exists
 if(history.length > 0) {
