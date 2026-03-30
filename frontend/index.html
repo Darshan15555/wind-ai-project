@@ -1,0 +1,826 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>Shadow Flicker Assessment Tool</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Syne:wght@400;500;700;800&display=swap" rel="stylesheet"/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+<style>
+  :root{
+    --bg:#0b0e14;--bg2:#111520;--bg3:#171d2c;--surface:#1b2235;--surface2:#212840;
+    --border:#2a3350;--border2:#3a4570;
+    --text:#e8eaf2;--text2:#8b93b0;--text3:#5a6380;
+    --accent:#4fd9b3;--accent2:#3abf9a;--accentd:#0d3d30;
+    --warn:#f59e0b;--warnd:#3d2a06;
+    --danger:#ef4444;--dangerd:#3d1212;
+    --info:#60a5fa;--infod:#0d2040;
+    --radius:10px;--radius-lg:16px;
+    --mono:'IBM Plex Mono',monospace;
+    --sans:'Syne',sans-serif;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:var(--sans);background:var(--bg);color:var(--text);height:100vh;overflow:hidden;display:flex;flex-direction:column}
+  
+  /* ── Header ── */
+  header{
+    display:flex;align-items:center;justify-content:space-between;
+    padding:0 20px;height:56px;
+    background:var(--bg2);border-bottom:1px solid var(--border);
+    flex-shrink:0;z-index:100;
+  }
+  .logo{display:flex;align-items:center;gap:10px}
+  .logo-icon{
+    width:32px;height:32px;border-radius:8px;
+    background:linear-gradient(135deg,var(--accent),#3b82f6);
+    display:flex;align-items:center;justify-content:center;font-size:16px;
+  }
+  .logo-text{font-size:15px;font-weight:700;letter-spacing:-.02em}
+  .logo-text span{color:var(--accent)}
+  .header-status{
+    display:flex;align-items:center;gap:8px;
+    font-size:12px;font-family:var(--mono);color:var(--text2);
+  }
+  .status-dot{width:7px;height:7px;border-radius:50%;background:var(--accent);animation:pulse 2s infinite}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+  .header-actions{display:flex;gap:8px}
+  .btn{
+    padding:6px 14px;border-radius:var(--radius);border:1px solid var(--border);
+    background:var(--surface);color:var(--text2);font-size:12px;font-family:var(--sans);
+    cursor:pointer;transition:all .15s;font-weight:500;
+  }
+  .btn:hover{background:var(--surface2);border-color:var(--border2);color:var(--text)}
+  .btn-primary{
+    background:var(--accent);border-color:var(--accent);color:#001a14;font-weight:700;
+  }
+  .btn-primary:hover{background:var(--accent2);border-color:var(--accent2)}
+  .btn-primary:disabled{background:var(--surface2);border-color:var(--border);color:var(--text3);cursor:not-allowed}
+
+  /* ── Main layout ── */
+  .main{display:flex;flex:1;overflow:hidden}
+  
+  /* ── Map panel ── */
+  .map-panel{flex:0 0 62%;position:relative;background:#0d1119}
+  #map{width:100%;height:100%}
+  .leaflet-container{background:#0d1119 !important}
+
+  .map-toolbar{
+    position:absolute;top:14px;left:14px;z-index:500;
+    display:flex;flex-direction:column;gap:8px;
+  }
+  .map-card{
+    background:rgba(17,21,32,.92);backdrop-filter:blur(8px);
+    border:1px solid var(--border);border-radius:var(--radius);
+    padding:10px 14px;min-width:210px;
+  }
+  .map-card-title{font-size:10px;font-family:var(--mono);color:var(--text3);text-transform:uppercase;letter-spacing:.08em;margin-bottom:6px}
+  .coord-row{display:flex;justify-content:space-between;font-size:12px;font-family:var(--mono);color:var(--accent);gap:20px}
+  .coord-label{color:var(--text3)}
+
+  .turbine-controls{display:flex;flex-direction:column;gap:10px}
+  .control-row{display:flex;align-items:center;justify-content:space-between;gap:10px;font-size:12px}
+  .control-label{color:var(--text2);font-size:11px}
+  .control-val{font-family:var(--mono);color:var(--accent);font-size:12px;min-width:48px;text-align:right}
+  input[type=range]{
+    -webkit-appearance:none;width:100%;height:3px;
+    background:var(--border2);border-radius:2px;outline:none;cursor:pointer;
+  }
+  input[type=range]::-webkit-slider-thumb{
+    -webkit-appearance:none;width:14px;height:14px;border-radius:50%;
+    background:var(--accent);cursor:pointer;
+  }
+
+  .analyze-fab{
+    position:absolute;bottom:20px;left:50%;transform:translateX(-50%);z-index:500;
+    padding:12px 32px;border-radius:50px;border:none;
+    background:var(--accent);color:#001a14;font-family:var(--sans);
+    font-size:14px;font-weight:800;cursor:pointer;transition:all .2s;
+    display:flex;align-items:center;gap:8px;letter-spacing:.02em;
+    box-shadow:0 4px 24px rgba(79,217,179,.3);
+  }
+  .analyze-fab:hover{background:var(--accent2);box-shadow:0 4px 32px rgba(79,217,179,.45);transform:translateX(-50%) translateY(-1px)}
+  .analyze-fab:disabled{background:var(--surface2);color:var(--text3);box-shadow:none;cursor:not-allowed}
+  .fab-spinner{width:16px;height:16px;border:2px solid transparent;border-top-color:#001a14;border-radius:50%;animation:spin .7s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
+
+  .map-hint{
+    position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);
+    background:rgba(17,21,32,.85);backdrop-filter:blur(8px);
+    border:1px solid var(--border);border-radius:var(--radius-lg);
+    padding:20px 28px;text-align:center;z-index:400;pointer-events:none;
+    transition:opacity .3s;
+  }
+  .map-hint h3{font-size:15px;font-weight:700;margin-bottom:6px}
+  .map-hint p{font-size:12px;color:var(--text2)}
+  .map-hint.hidden{opacity:0}
+
+  /* ── Dashboard panel ── */
+  .dashboard{
+    flex:1;overflow-y:auto;background:var(--bg2);
+    border-left:1px solid var(--border);
+    display:flex;flex-direction:column;
+  }
+  .dashboard::-webkit-scrollbar{width:4px}
+  .dashboard::-webkit-scrollbar-track{background:var(--bg2)}
+  .dashboard::-webkit-scrollbar-thumb{background:var(--border2);border-radius:2px}
+
+  .dash-header{
+    padding:16px 18px 12px;border-bottom:1px solid var(--border);
+    display:flex;align-items:center;justify-content:space-between;flex-shrink:0;
+  }
+  .dash-title{font-size:13px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--text2)}
+  .dash-badge{
+    font-size:10px;font-family:var(--mono);padding:3px 8px;
+    border-radius:4px;border:1px solid var(--border2);color:var(--text3);
+  }
+
+  .dash-empty{
+    flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;
+    gap:12px;padding:40px 24px;text-align:center;color:var(--text3);
+  }
+  .dash-empty-icon{font-size:40px;opacity:.5}
+  .dash-empty h3{font-size:14px;font-weight:600;color:var(--text2)}
+  .dash-empty p{font-size:12px;line-height:1.6}
+
+  .dash-content{padding:14px;display:flex;flex-direction:column;gap:12px}
+
+  /* Metric cards */
+  .metrics-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  .metric-card{
+    background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
+    padding:12px 14px;
+  }
+  .metric-card-label{font-size:10px;color:var(--text3);font-family:var(--mono);text-transform:uppercase;letter-spacing:.08em;margin-bottom:6px}
+  .metric-card-value{font-size:24px;font-weight:800;line-height:1;color:var(--text)}
+  .metric-card-sub{font-size:11px;color:var(--text2);margin-top:4px}
+  .metric-card.accent{border-color:var(--accentd);background:rgba(79,217,179,.05)}
+  .metric-card.warn{border-color:var(--warnd);background:rgba(245,158,11,.05)}
+  .metric-card.danger{border-color:var(--dangerd);background:rgba(239,68,68,.05)}
+  .metric-val-accent{color:var(--accent)}
+  .metric-val-warn{color:var(--warn)}
+  .metric-val-danger{color:var(--danger)}
+
+  /* Risk gauge */
+  .risk-section{
+    background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
+    padding:14px;
+  }
+  .risk-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}
+  .risk-title{font-size:11px;font-family:var(--mono);text-transform:uppercase;letter-spacing:.08em;color:var(--text3)}
+  .risk-badge{
+    font-size:11px;font-weight:700;padding:3px 10px;border-radius:5px;
+    font-family:var(--mono);
+  }
+  .risk-badge.low{background:rgba(79,217,179,.15);color:var(--accent);border:1px solid var(--accentd)}
+  .risk-badge.medium{background:rgba(245,158,11,.15);color:var(--warn);border:1px solid var(--warnd)}
+  .risk-badge.high{background:rgba(239,68,68,.15);color:var(--danger);border:1px solid var(--dangerd)}
+  .risk-bar-wrap{position:relative;height:8px;background:var(--bg);border-radius:4px;overflow:hidden;margin-bottom:8px}
+  .risk-bar{height:100%;border-radius:4px;transition:width .8s cubic-bezier(.34,1.56,.64,1);min-width:4px}
+  .risk-bar.low{background:linear-gradient(90deg,var(--accent),#3abf9a)}
+  .risk-bar.medium{background:linear-gradient(90deg,var(--warn),#d97706)}
+  .risk-bar.high{background:linear-gradient(90deg,var(--danger),#dc2626)}
+  .risk-score-row{display:flex;justify-content:space-between;font-size:11px}
+  .risk-score-num{font-family:var(--mono);font-weight:700;font-size:18px}
+  .risk-factors{margin-top:10px;display:flex;flex-direction:column;gap:5px}
+  .factor-item{font-size:11px;color:var(--text2);display:flex;gap:7px;align-items:flex-start;line-height:1.4}
+  .factor-dot{width:5px;height:5px;border-radius:50%;background:var(--text3);flex-shrink:0;margin-top:4px}
+
+  /* Buildings chart */
+  .buildings-section{
+    background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:14px;
+  }
+  .section-title{font-size:11px;font-family:var(--mono);text-transform:uppercase;letter-spacing:.08em;color:var(--text3);margin-bottom:10px}
+  .buildings-bar{display:flex;height:20px;border-radius:5px;overflow:hidden;gap:2px;margin-bottom:8px}
+  .bar-res{background:var(--info);transition:flex .6s ease}
+  .bar-com{background:var(--warn);transition:flex .6s ease}
+  .buildings-legend{display:flex;gap:14px}
+  .leg-item{display:flex;align-items:center;gap:5px;font-size:11px;color:var(--text2)}
+  .leg-dot{width:8px;height:8px;border-radius:2px}
+
+  /* Sensitive locations */
+  .sensitive-section{
+    background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:14px;
+  }
+  .sensitive-list{display:flex;flex-direction:column;gap:6px}
+  .sensitive-item{
+    display:flex;align-items:flex-start;gap:8px;
+    background:rgba(239,68,68,.06);border:1px solid var(--dangerd);
+    border-radius:7px;padding:8px 10px;font-size:12px;color:var(--text);
+  }
+  .sensitive-icon{color:var(--danger);font-size:13px;flex-shrink:0;margin-top:1px}
+  .no-sensitive{font-size:12px;color:var(--accent);display:flex;align-items:center;gap:6px}
+
+  /* Recommendation */
+  .rec-section{
+    background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:14px;
+  }
+  .rec-text{font-size:13px;color:var(--text);line-height:1.6;margin-bottom:12px}
+  .action-list{display:flex;flex-direction:column;gap:6px}
+  .action-item{
+    display:flex;align-items:flex-start;gap:8px;font-size:12px;color:var(--text2);line-height:1.5;
+  }
+  .action-num{
+    font-family:var(--mono);font-size:10px;font-weight:700;
+    background:var(--accentd);color:var(--accent);
+    width:18px;height:18px;border-radius:4px;display:flex;align-items:center;justify-content:center;
+    flex-shrink:0;margin-top:1px;
+  }
+
+  /* Environment tags */
+  .env-section{
+    background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:14px;
+  }
+  .env-tags{display:flex;flex-wrap:wrap;gap:7px;margin-bottom:8px}
+  .env-tag{
+    font-size:11px;font-family:var(--mono);padding:4px 10px;border-radius:5px;
+    border:1px solid var(--border);background:var(--bg);color:var(--text2);
+  }
+  .env-tag.on{border-color:var(--accentd);background:rgba(79,217,179,.08);color:var(--accent)}
+  .env-tag.warn{border-color:var(--warnd);background:rgba(245,158,11,.08);color:var(--warn)}
+
+  /* History */
+  .history-section{
+    background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:14px;
+  }
+  .history-list{display:flex;flex-direction:column;gap:6px}
+  .history-item{
+    display:flex;align-items:center;gap:10px;padding:8px 10px;
+    border:1px solid var(--border);border-radius:8px;cursor:pointer;
+    transition:all .12s;
+  }
+  .history-item:hover{background:var(--surface2);border-color:var(--border2)}
+  .history-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+  .history-info{flex:1;min-width:0}
+  .history-coords{font-family:var(--mono);font-size:11px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .history-meta{font-size:10px;color:var(--text3);margin-top:2px}
+  .history-risk{font-size:10px;font-family:var(--mono);font-weight:700;padding:2px 7px;border-radius:4px}
+
+  /* Export */
+  .export-row{display:flex;gap:8px}
+
+  /* Skeleton loaders */
+  .skel{
+    border-radius:6px;background:linear-gradient(90deg,var(--surface) 25%,var(--surface2) 50%,var(--surface) 75%);
+    background-size:200% 100%;animation:skel .8s infinite;
+  }
+  @keyframes skel{0%{background-position:200% 0}100%{background-position:-200% 0}}
+
+  /* Scrollbar */
+  ::-webkit-scrollbar{width:6px;height:6px}
+  ::-webkit-scrollbar-track{background:transparent}
+  ::-webkit-scrollbar-thumb{background:var(--border2);border-radius:3px}
+
+  .leaflet-popup-content-wrapper{background:var(--surface)!important;border:1px solid var(--border)!important;color:var(--text)!important;border-radius:var(--radius)!important;box-shadow:0 4px 20px rgba(0,0,0,.5)!important}
+  .leaflet-popup-tip{background:var(--surface)!important}
+  .leaflet-popup-content{color:var(--text)!important;font-family:var(--sans)!important;font-size:13px!important}
+  .leaflet-control-zoom a{background:var(--surface)!important;border-color:var(--border)!important;color:var(--text)!important}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">
+    <div class="logo-icon">⚡</div>
+    <div class="logo-text">Shadow<span>Flicker</span> Assessment</div>
+  </div>
+  <div class="header-status">
+    <div class="status-dot"></div>
+    <span id="status-text">Ready — click map to place turbine</span>
+  </div>
+  <div class="header-actions">
+    <button class="btn" onclick="resetAll()">Reset</button>
+    <button class="btn" onclick="exportJSON()" id="export-btn" disabled>Export JSON</button>
+  </div>
+</header>
+
+<div class="main">
+  <!-- MAP PANEL -->
+  <div class="map-panel">
+    <div class="map-toolbar">
+      <!-- Coordinates card -->
+      <div class="map-card" id="coord-card" style="display:none">
+        <div class="map-card-title">Turbine Location</div>
+        <div class="coord-row">
+          <span><span class="coord-label">LAT </span><span id="disp-lat">—</span></span>
+          <span><span class="coord-label">LNG </span><span id="disp-lng">—</span></span>
+        </div>
+      </div>
+      <!-- Turbine spec card -->
+      <div class="map-card">
+        <div class="map-card-title">Turbine Specs</div>
+        <div class="turbine-controls">
+          <div>
+            <div class="control-row">
+              <span class="control-label">Hub height</span>
+              <span class="control-val" id="height-val">150 m</span>
+            </div>
+            <input type="range" id="height-slider" min="80" max="250" value="150" oninput="updateTurbine()"/>
+          </div>
+          <div>
+            <div class="control-row">
+              <span class="control-label">Rotor diameter</span>
+              <span class="control-val" id="rotor-val">120 m</span>
+            </div>
+            <input type="range" id="rotor-slider" min="60" max="200" value="120" oninput="updateTurbine()"/>
+          </div>
+          <div class="control-row" style="margin-top:4px">
+            <span class="control-label">Shadow radius</span>
+            <span class="control-val" id="radius-val" style="color:var(--text2)">~850 m</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div id="map"></div>
+
+    <div class="map-hint" id="map-hint">
+      <div class="map-hint-icon" style="font-size:28px;margin-bottom:8px">📍</div>
+      <h3>Click anywhere to place turbine</h3>
+      <p>Shadow flicker zone will be drawn automatically<br/>based on turbine specifications</p>
+    </div>
+
+    <button class="analyze-fab" id="analyze-btn" onclick="runAnalysis()" disabled>
+      <span id="fab-icon">🔍</span>
+      <span id="fab-label">Place turbine first</span>
+    </button>
+  </div>
+
+  <!-- DASHBOARD PANEL -->
+  <div class="dashboard" id="dashboard">
+    <div class="dash-header">
+      <span class="dash-title">Analysis Dashboard</span>
+      <span class="dash-badge" id="analysis-count">0 analyses</span>
+    </div>
+
+    <div class="dash-empty" id="dash-empty">
+      <div class="dash-empty-icon">📊</div>
+      <h3>No analysis yet</h3>
+      <p>Click on the map to place a wind turbine,<br/>then press Analyze to assess shadow flicker impact.</p>
+    </div>
+
+    <div class="dash-content" id="dash-content" style="display:none"></div>
+  </div>
+</div>
+
+<script>
+// ── State ──────────────────────────────────────────────────────────────────
+const API = 'http://localhost:8000';
+let map, turbineMarker, shadowEllipse;
+let turbineLat = null, turbineLng = null;
+let isAnalyzing = false;
+let history = JSON.parse(localStorage.getItem('sfa_history') || '[]');
+let analysisCount = history.length;
+
+// ── Map setup ──────────────────────────────────────────────────────────────
+map = L.map('map', {
+  center: [20.5937, 78.9629],
+  zoom: 5,
+  zoomControl: false
+});
+
+L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+  attribution: 'Tiles © Esri',
+  maxZoom: 19,
+}).addTo(map);
+
+L.control.zoom({ position: 'bottomright' }).addTo(map);
+
+// Dark overlay for better contrast
+const darkTile = L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_only_labels/{z}/{x}/{y}{r}.png', {
+  opacity: 0.7, maxZoom: 19
+}).addTo(map);
+
+// Turbine icon
+const turbineIcon = L.divIcon({
+  html: `<div style="
+    width:28px;height:28px;background:#4fd9b3;border-radius:50%;
+    border:2px solid #001a14;display:flex;align-items:center;justify-content:center;
+    font-size:14px;box-shadow:0 0 0 4px rgba(79,217,179,.25);
+  ">⚡</div>`,
+  iconSize:[28,28],iconAnchor:[14,14],className:''
+});
+
+map.on('click', (e) => {
+  if(isAnalyzing) return;
+  turbineLat = e.latlng.lat;
+  turbineLng = e.latlng.lng;
+  placeTurbine();
+});
+
+function placeTurbine() {
+  if(turbineMarker) map.removeLayer(turbineMarker);
+  turbineMarker = L.marker([turbineLat, turbineLng], {icon: turbineIcon}).addTo(map);
+  drawShadowZone();
+  updateCoordDisplay();
+  document.getElementById('map-hint').classList.add('hidden');
+  document.getElementById('coord-card').style.display = 'block';
+  document.getElementById('analyze-btn').disabled = false;
+  document.getElementById('fab-label').textContent = 'Analyze Location';
+  document.getElementById('fab-icon').textContent = '🔍';
+  document.getElementById('status-text').textContent = `Turbine at ${turbineLat.toFixed(4)}, ${turbineLng.toFixed(4)}`;
+}
+
+function drawShadowZone() {
+  if(shadowEllipse) map.removeLayer(shadowEllipse);
+  const height = parseInt(document.getElementById('height-slider').value);
+  const radius = shadowRadius();
+  // Ellipse: shadow stretches E-W (azimuth), compressed N-S
+  shadowEllipse = L.ellipse([turbineLat, turbineLng], [radius, radius * 0.62], 0, {
+    color: '#f59e0b',
+    fillColor: '#f59e0b',
+    fillOpacity: 0.12,
+    weight: 1.5,
+    dashArray: '6 4',
+    opacity: 0.8
+  }).addTo(map);
+}
+
+function shadowRadius() {
+  const h = parseInt(document.getElementById('height-slider').value);
+  return Math.round(h * 5.5);
+}
+
+function updateTurbine() {
+  const h = document.getElementById('height-slider').value;
+  const r = document.getElementById('rotor-slider').value;
+  const rad = Math.round(h * 5.5);
+  document.getElementById('height-val').textContent = h + ' m';
+  document.getElementById('rotor-val').textContent = r + ' m';
+  document.getElementById('radius-val').textContent = '~' + rad + ' m';
+  if(turbineLat) drawShadowZone();
+}
+
+function updateCoordDisplay() {
+  document.getElementById('disp-lat').textContent = turbineLat.toFixed(5);
+  document.getElementById('disp-lng').textContent = turbineLng.toFixed(5);
+}
+
+// ── Analysis ───────────────────────────────────────────────────────────────
+async function runAnalysis() {
+  if(!turbineLat || isAnalyzing) return;
+  isAnalyzing = true;
+  setAnalyzing(true);
+  showSkeleton();
+
+  try {
+    // Capture map screenshot
+    let imageBase64 = null;
+    try {
+      const mapEl = document.getElementById('map');
+      const canvas = await html2canvas(mapEl, {
+        useCORS: true, allowTaint: true, scale: 1,
+        backgroundColor: '#0d1119', logging: false
+      });
+      imageBase64 = canvas.toDataURL('image/png').split(',')[1];
+    } catch(e) {
+      console.warn('Screenshot failed, using placeholder:', e);
+      // Use a minimal 1x1 pixel if screenshot fails (mock will still work)
+      imageBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+    }
+
+    const height = parseInt(document.getElementById('height-slider').value);
+    const rotor = parseInt(document.getElementById('rotor-slider').value);
+    const rad = shadowRadius();
+
+    const payload = {
+      image_base64: imageBase64,
+      latitude: turbineLat,
+      longitude: turbineLng,
+      shadow_radius_m: rad,
+      turbine: { height, rotor_diameter: rotor },
+      timestamp: new Date().toISOString()
+    };
+
+    const res = await fetch(`${API}/analyze`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+
+    if (!res.ok) throw new Error(`API error: ${res.status}`);
+    const data = await res.json();
+
+    // Store in history
+    const entry = {
+      id: Date.now(),
+      lat: turbineLat,
+      lng: turbineLng,
+      height, rotor, rad,
+      timestamp: new Date().toLocaleString(),
+      result: data
+    };
+    history.unshift(entry);
+    if(history.length > 20) history.pop();
+    localStorage.setItem('sfa_history', JSON.stringify(history));
+    analysisCount++;
+    document.getElementById('analysis-count').textContent = analysisCount + ' ' + (analysisCount === 1 ? 'analysis' : 'analyses');
+    document.getElementById('export-btn').disabled = false;
+
+    renderDashboard(data, entry);
+    document.getElementById('status-text').textContent = `Analysis complete — Risk: ${data.risk_assessment.level}`;
+
+  } catch(err) {
+    console.error(err);
+    document.getElementById('status-text').textContent = 'Error: ' + err.message + ' (Is backend running?)';
+    showError(err.message);
+  }
+
+  isAnalyzing = false;
+  setAnalyzing(false);
+}
+
+function setAnalyzing(on) {
+  const btn = document.getElementById('analyze-btn');
+  const icon = document.getElementById('fab-icon');
+  const label = document.getElementById('fab-label');
+  btn.disabled = on;
+  if(on) {
+    icon.innerHTML = '<div class="fab-spinner"></div>';
+    label.textContent = 'Analyzing…';
+  } else {
+    icon.textContent = '🔍';
+    label.textContent = 'Analyze Location';
+  }
+}
+
+// ── Dashboard Render ───────────────────────────────────────────────────────
+function renderDashboard(d, entry) {
+  document.getElementById('dash-empty').style.display = 'none';
+  const dc = document.getElementById('dash-content');
+  dc.style.display = 'flex';
+
+  const riskClass = d.risk_assessment.level.toLowerCase();
+  const riskColor = riskClass === 'low' ? 'var(--accent)' : riskClass === 'medium' ? 'var(--warn)' : 'var(--danger)';
+  const resCount = d.building_count.residential;
+  const comCount = d.building_count.commercial;
+  const total = d.building_count.total || 1;
+  const resPct = Math.round((resCount / total) * 100);
+  const comPct = 100 - resPct;
+
+  const sensHtml = d.sensitive_locations.length === 0
+    ? `<div class="no-sensitive">✓ No sensitive locations detected in zone</div>`
+    : d.sensitive_locations.map(s => `
+      <div class="sensitive-item">
+        <span class="sensitive-icon">⚠</span>
+        <span>${s}</span>
+      </div>`).join('');
+
+  const actionItems = d.action_items.map((a, i) => `
+    <div class="action-item">
+      <div class="action-num">${i+1}</div>
+      <span>${a}</span>
+    </div>`).join('');
+
+  const factorsHtml = d.risk_assessment.factors.map(f => `
+    <div class="factor-item">
+      <div class="factor-dot" style="background:${riskColor}"></div>
+      <span>${f}</span>
+    </div>`).join('');
+
+  const histHtml = history.slice(0, 5).map(h => {
+    const rl = h.result.risk_assessment.level.toLowerCase();
+    const hc = rl === 'low' ? 'var(--accent)' : rl === 'medium' ? 'var(--warn)' : 'var(--danger)';
+    return `<div class="history-item" onclick="reloadHistory(${h.id})">
+      <div class="history-dot" style="background:${hc}"></div>
+      <div class="history-info">
+        <div class="history-coords">${h.lat.toFixed(4)}, ${h.lng.toFixed(4)}</div>
+        <div class="history-meta">${h.timestamp} · ${h.result.building_count.total} buildings · ${h.result.land_use}</div>
+      </div>
+      <div class="history-risk" style="background:${hc}22;color:${hc};border:1px solid ${hc}44">${h.result.risk_assessment.level}</div>
+    </div>`;
+  }).join('');
+
+  dc.innerHTML = `
+    <!-- Location info -->
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:12px 14px">
+      <div class="section-title">Location</div>
+      <div style="display:flex;gap:14px;flex-wrap:wrap">
+        <div style="font-size:11px;color:var(--text2)">Lat <span style="font-family:var(--mono);color:var(--text)">${entry.lat.toFixed(5)}</span></div>
+        <div style="font-size:11px;color:var(--text2)">Lng <span style="font-family:var(--mono);color:var(--text)">${entry.lng.toFixed(5)}</span></div>
+        <div style="font-size:11px;color:var(--text2)">Height <span style="font-family:var(--mono);color:var(--text)">${entry.height}m</span></div>
+        <div style="font-size:11px;color:var(--text2)">Rotor <span style="font-family:var(--mono);color:var(--text)">${entry.rotor}m</span></div>
+        <div style="font-size:11px;color:var(--text2)">Land use <span style="font-family:var(--mono);color:var(--accent)">${d.land_use}</span></div>
+      </div>
+    </div>
+
+    <!-- Metrics grid -->
+    <div class="metrics-grid">
+      <div class="metric-card accent">
+        <div class="metric-card-label">Total Buildings</div>
+        <div class="metric-card-value metric-val-accent">${d.building_count.total}</div>
+        <div class="metric-card-sub">${resCount} residential · ${comCount} commercial</div>
+      </div>
+      <div class="metric-card ${riskClass === 'low' ? 'accent' : riskClass === 'medium' ? 'warn' : 'danger'}">
+        <div class="metric-card-label">Risk Level</div>
+        <div class="metric-card-value metric-val-${riskClass === 'low' ? 'accent' : riskClass === 'medium' ? 'warn' : 'danger'}">${d.risk_assessment.level}</div>
+        <div class="metric-card-sub">Score: ${d.risk_assessment.score}/100</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-card-label">Shadow Zone</div>
+        <div class="metric-card-value" style="font-size:20px">${d.shadow_zone_area_ha} ha</div>
+        <div class="metric-card-sub">${entry.rad}m radius</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-card-label">Est. Population</div>
+        <div class="metric-card-value" style="font-size:20px">${d.affected_population_estimate}</div>
+        <div class="metric-card-sub">${d.density.classification} · Score ${d.density.score}/10</div>
+      </div>
+    </div>
+
+    <!-- Risk gauge -->
+    <div class="risk-section">
+      <div class="risk-header">
+        <span class="risk-title">Risk Assessment</span>
+        <span class="risk-badge ${riskClass}">${d.risk_assessment.level}</span>
+      </div>
+      <div class="risk-bar-wrap">
+        <div class="risk-bar ${riskClass}" style="width:${d.risk_assessment.score}%"></div>
+      </div>
+      <div class="risk-score-row">
+        <span class="risk-score-num" style="color:${riskColor}">${d.risk_assessment.score}<small style="font-size:12px;opacity:.6">/100</small></span>
+        <span style="font-size:11px;color:var(--text3)">IEC 61400-11 threshold: 30h/yr</span>
+      </div>
+      <div class="risk-factors">${factorsHtml}</div>
+    </div>
+
+    <!-- Building breakdown -->
+    <div class="buildings-section">
+      <div class="section-title">Building Breakdown</div>
+      <div class="buildings-bar">
+        <div class="bar-res" style="flex:${resPct}"></div>
+        <div class="bar-com" style="flex:${comPct}"></div>
+      </div>
+      <div class="buildings-legend">
+        <div class="leg-item"><div class="leg-dot" style="background:var(--info)"></div>${resCount} Residential (${resPct}%)</div>
+        <div class="leg-item"><div class="leg-dot" style="background:var(--warn)"></div>${comCount} Commercial (${comPct}%)</div>
+      </div>
+    </div>
+
+    <!-- Sensitive locations -->
+    <div class="sensitive-section">
+      <div class="section-title">Sensitive Locations</div>
+      <div class="sensitive-list">${sensHtml}</div>
+    </div>
+
+    <!-- Environment -->
+    <div class="env-section">
+      <div class="section-title">Environmental Context</div>
+      <div class="env-tags">
+        <span class="env-tag ${d.vegetation_coverage === 'High' ? 'on' : ''}">🌿 Vegetation: ${d.vegetation_coverage}</span>
+        <span class="env-tag ${d.water_bodies ? 'warn' : ''}">💧 Water: ${d.water_bodies ? 'Present' : 'None'}</span>
+        <span class="env-tag">🏗 Infrastructure: ${d.infrastructure_quality}</span>
+        <span class="env-tag on">📐 ${d.density.classification} density</span>
+      </div>
+    </div>
+
+    <!-- Recommendation -->
+    <div class="rec-section">
+      <div class="section-title">Recommendation</div>
+      <div class="rec-text">${d.recommendation}</div>
+      <div class="action-list">${actionItems}</div>
+    </div>
+
+    <!-- History -->
+    ${history.length > 1 ? `<div class="history-section">
+      <div class="section-title">Analysis History</div>
+      <div class="history-list">${histHtml}</div>
+    </div>` : ''}
+
+    <!-- Export -->
+    <div class="export-row">
+      <button class="btn btn-primary" style="flex:1" onclick="exportJSON()">↓ Export JSON</button>
+      <button class="btn" style="flex:1" onclick="printReport()">🖨 Print Report</button>
+    </div>
+  `;
+}
+
+function showSkeleton() {
+  document.getElementById('dash-empty').style.display = 'none';
+  const dc = document.getElementById('dash-content');
+  dc.style.display = 'flex';
+  dc.innerHTML = `
+    <div class="skel" style="height:48px;border-radius:var(--radius)"></div>
+    <div class="metrics-grid">
+      <div class="skel" style="height:80px;border-radius:var(--radius)"></div>
+      <div class="skel" style="height:80px;border-radius:var(--radius)"></div>
+      <div class="skel" style="height:80px;border-radius:var(--radius)"></div>
+      <div class="skel" style="height:80px;border-radius:var(--radius)"></div>
+    </div>
+    <div class="skel" style="height:110px;border-radius:var(--radius)"></div>
+    <div class="skel" style="height:60px;border-radius:var(--radius)"></div>
+    <div class="skel" style="height:120px;border-radius:var(--radius)"></div>
+  `;
+}
+
+function showError(msg) {
+  const dc = document.getElementById('dash-content');
+  dc.style.display = 'flex';
+  dc.innerHTML = `
+    <div style="background:var(--dangerd);border:1px solid var(--danger);border-radius:var(--radius);padding:16px">
+      <div style="font-size:13px;font-weight:700;color:var(--danger);margin-bottom:6px">Analysis Failed</div>
+      <div style="font-size:12px;color:var(--text2)">${msg}</div>
+      <div style="font-size:11px;color:var(--text3);margin-top:8px">
+        Make sure the backend is running: <code style="font-family:var(--mono);background:var(--surface);padding:2px 6px;border-radius:4px">uvicorn main:app --reload --port 8000</code>
+      </div>
+    </div>
+  `;
+}
+
+function reloadHistory(id) {
+  const entry = history.find(h => h.id === id);
+  if(!entry) return;
+  turbineLat = entry.lat;
+  turbineLng = entry.lng;
+  document.getElementById('height-slider').value = entry.height;
+  document.getElementById('rotor-slider').value = entry.rotor;
+  updateTurbine();
+  placeTurbine();
+  map.setView([entry.lat, entry.lng], 14);
+  renderDashboard(entry.result, entry);
+}
+
+function resetAll() {
+  turbineLat = null; turbineLng = null;
+  if(turbineMarker) { map.removeLayer(turbineMarker); turbineMarker = null; }
+  if(shadowEllipse) { map.removeLayer(shadowEllipse); shadowEllipse = null; }
+  document.getElementById('map-hint').classList.remove('hidden');
+  document.getElementById('coord-card').style.display = 'none';
+  document.getElementById('analyze-btn').disabled = true;
+  document.getElementById('fab-label').textContent = 'Place turbine first';
+  document.getElementById('fab-icon').textContent = '🔍';
+  document.getElementById('dash-empty').style.display = 'flex';
+  document.getElementById('dash-content').style.display = 'none';
+  document.getElementById('status-text').textContent = 'Ready — click map to place turbine';
+}
+
+function exportJSON() {
+  if(!history.length) return;
+  const blob = new Blob([JSON.stringify(history[0], null, 2)], {type:'application/json'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `shadow_flicker_${Date.now()}.json`;
+  a.click();
+}
+
+function printReport() {
+  window.print();
+}
+
+// ── Leaflet Ellipse plugin (lightweight) ──────────────────────────────────
+// A simple approximation using a circle scaled by CSS transform
+L.Ellipse = L.Circle.extend({
+  initialize(latlng, [radiusX, radiusY], tilt, opts) {
+    L.Circle.prototype.initialize.call(this, latlng, { radius: radiusX, ...opts });
+    this._radiusX = radiusX;
+    this._radiusY = radiusY;
+    this._tilt = tilt || 0;
+  },
+  _project() {
+    L.Circle.prototype._project.call(this);
+    const pX = this._map.latLngToLayerPoint(
+      L.latLng(this._latlng.lat, this._latlng.lng + this._radiusX / (111320 * Math.cos(this._latlng.lat * Math.PI / 180)))
+    );
+    const pY = this._map.latLngToLayerPoint(
+      L.latLng(this._latlng.lat + this._radiusY / 111320, this._latlng.lng)
+    );
+    const center = this._point;
+    const rx = Math.abs(pX.x - center.x);
+    const ry = Math.abs(pY.y - center.y);
+    if (this._path) {
+      this._path.setAttribute('d', `
+        M ${center.x - rx} ${center.y}
+        A ${rx} ${ry} 0 1 0 ${center.x + rx} ${center.y}
+        A ${rx} ${ry} 0 1 0 ${center.x - rx} ${center.y}
+        Z
+      `);
+    }
+  },
+  _updatePath() {
+    this._project();
+  },
+  _initPath() {
+    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    this._path = path;
+    this.options.interactive && path.classList.add('leaflet-interactive');
+    this._renderer._layers[L.stamp(this)] = this;
+    this._renderer._container.appendChild(path);
+  }
+});
+
+L.ellipse = (latlng, radii, tilt, opts) => new L.Ellipse(latlng, radii, tilt, opts);
+
+// Init turbine spec display
+updateTurbine();
+
+// Restore last history if exists
+if(history.length > 0) {
+  document.getElementById('analysis-count').textContent = history.length + ' ' + (history.length === 1 ? 'analysis' : 'analyses');
+  document.getElementById('export-btn').disabled = false;
+  analysisCount = history.length;
+}
+</script>
+</body>
+</html>

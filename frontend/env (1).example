@@ -1,0 +1,7 @@
+# Shadow Flicker Assessment Tool - Frontend Environment
+VITE_API_URL=http://localhost:8000
+VITE_MAP_CENTER_LAT=20.5937
+VITE_MAP_CENTER_LNG=78.9629
+VITE_MAP_ZOOM=5
+VITE_MAX_HISTORY_ITEMS=20
+VITE_ENABLE_EXPORT=true
