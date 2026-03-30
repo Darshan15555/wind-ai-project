@@ -179,6 +179,12 @@ Guidelines:
 - OVERRIDE: If the zone is mostly open fields, scrubland, or bare soil, prefer land_use = "Agricultural" or "Barren".
 - OVERRIDE: 0 clear buildings usually means Low risk with score 0-20.
 - OVERRIDE: Prefer undercounting over hallucinating and base every field only on direct visual evidence from the image.
+- OVERRIDE: In sparse rural scenes, stay conservative and prefer lower counts when structures are ambiguous.
+- OVERRIDE: In dense urban scenes with continuous rooftops across much of the ellipse, do NOT undercount by trying to enumerate only a few clearly isolated roofs.
+- OVERRIDE: For dense urban scenes, return a realistic estimate of total visible buildings/structures within the ellipse, even if exact counting is impossible.
+- OVERRIDE: If the ellipse covers a dense city-core or tightly packed urban neighborhood, totals may reasonably be in the hundreds or thousands rather than tens.
+- OVERRIDE: If density.classification is "Urban" and the ellipse is visually packed with buildings, building_count.total should usually be at least several hundred.
+- OVERRIDE: For dense urban scenes, set risk_assessment.score near the top of the range, and use 95-100 when the zone is clearly unsuitable.
 """
 
 

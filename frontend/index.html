@@ -46,6 +46,47 @@
   }
   .status-dot{width:7px;height:7px;border-radius:50%;background:var(--accent);animation:pulse 2s infinite}
   @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+  .header-search{
+    position:relative;flex:0 1 360px;margin:0 18px;
+  }
+  .search-bar{
+    display:flex;align-items:center;gap:8px;
+  }
+  .search-input{
+    width:100%;height:38px;padding:0 14px;
+    border-radius:999px;border:1px solid var(--border);
+    background:var(--surface);color:var(--text);
+    font-size:13px;font-family:var(--sans);outline:none;
+    transition:border-color .15s, box-shadow .15s;
+  }
+  .search-input:focus{
+    border-color:var(--accent);
+    box-shadow:0 0 0 3px rgba(79,217,179,.12);
+  }
+  .search-input::placeholder{color:var(--text3)}
+  .search-results{
+    position:absolute;top:44px;left:0;right:0;z-index:250;
+    background:rgba(17,21,32,.97);backdrop-filter:blur(10px);
+    border:1px solid var(--border);border-radius:14px;
+    overflow:hidden;box-shadow:0 14px 34px rgba(0,0,0,.35);
+    display:none;
+  }
+  .search-results.open{display:block}
+  .search-item{
+    padding:10px 14px;border-bottom:1px solid rgba(58,69,112,.35);
+    cursor:pointer;transition:background .12s;
+  }
+  .search-item:last-child{border-bottom:none}
+  .search-item:hover{background:var(--surface2)}
+  .search-name{font-size:12px;color:var(--text);font-weight:600}
+  .search-meta{font-size:10px;color:var(--text3);margin-top:3px;font-family:var(--mono)}
+  .search-btn{
+    width:38px;height:38px;border-radius:999px;border:1px solid var(--border);
+    background:var(--surface);color:var(--accent);cursor:pointer;
+    display:flex;align-items:center;justify-content:center;
+    font-size:14px;transition:all .15s;flex-shrink:0;
+  }
+  .search-btn:hover{background:var(--surface2);border-color:var(--accent)}
   .header-actions{display:flex;gap:8px}
   .btn{
     padding:6px 14px;border-radius:var(--radius);border:1px solid var(--border);
@@ -317,6 +358,19 @@
     <div class="logo-icon">⚡</div>
     <div class="logo-text">Shadow<span>Flicker</span> Assessment</div>
   </div>
+  <div class="header-search">
+    <div class="search-bar">
+      <input
+        type="text"
+        id="place-search"
+        class="search-input"
+        placeholder="Search city or place..."
+        autocomplete="off"
+      />
+      <button class="search-btn" id="search-btn" type="button" aria-label="Search place">⌕</button>
+    </div>
+    <div class="search-results" id="search-results"></div>
+  </div>
   <div class="header-status">
     <div class="status-dot"></div>
     <span id="status-text">Ready — click map to place turbine</span>
@@ -423,6 +477,8 @@ let shadowHour = 12;
 let isAnalyzing = false;
 let history = JSON.parse(localStorage.getItem('sfa_history') || '[]');
 let analysisCount = history.length;
+let searchTimer = null;
+let activeSearchToken = 0;
 
 // ── Map setup ──────────────────────────────────────────────────────────────
 map = L.map('map', {
@@ -550,6 +606,7 @@ function updateShadowTime() {
   const max = parseFloat(slider.max);
   const percent = ((shadowHour - min) / (max - min)) * 100;
   bubble.style.left = `calc(${percent}% + ${(0.5 - percent / 100) * 16}px)`;
+  document.getElementById('radius-val').textContent = '~' + shadowRadius() + ' m';
   if(turbineLat) drawShadowZone();
 }
 
@@ -566,6 +623,70 @@ function updateTurbine() {
 function updateCoordDisplay() {
   document.getElementById('disp-lat').textContent = turbineLat.toFixed(5);
   document.getElementById('disp-lng').textContent = turbineLng.toFixed(5);
+}
+
+function renderSearchResults(items) {
+  const box = document.getElementById('search-results');
+  if(!items.length) {
+    box.classList.remove('open');
+    box.innerHTML = '';
+    return;
+  }
+  box.innerHTML = items.map((item, index) => `
+    <div class="search-item" data-index="${index}">
+      <div class="search-name">${item.name}</div>
+      <div class="search-meta">${item.meta}</div>
+    </div>
+  `).join('');
+  box.classList.add('open');
+
+  [...box.querySelectorAll('.search-item')].forEach((el) => {
+    el.addEventListener('click', () => {
+      const chosen = items[parseInt(el.dataset.index, 10)];
+      map.setView([chosen.lat, chosen.lng], chosen.zoom || 12);
+      document.getElementById('place-search').value = chosen.name;
+      box.classList.remove('open');
+      box.innerHTML = '';
+      document.getElementById('status-text').textContent = `Map centered on ${chosen.name}`;
+    });
+  });
+}
+
+async function searchPlaces(query) {
+  const token = ++activeSearchToken;
+  try {
+    const res = await fetch(`https://nominatim.openstreetmap.org/search?format=jsonv2&limit=6&q=${encodeURIComponent(query)}`, {
+      headers: { 'Accept': 'application/json' }
+    });
+    if(!res.ok) throw new Error('Search failed');
+    const results = await res.json();
+    if(token !== activeSearchToken) return;
+    renderSearchResults(results.map((item) => ({
+      name: item.display_name.split(',').slice(0, 2).join(','),
+      meta: item.display_name,
+      lat: parseFloat(item.lat),
+      lng: parseFloat(item.lon),
+      zoom: 12
+    })));
+  } catch(err) {
+    if(token !== activeSearchToken) return;
+    renderSearchResults([]);
+  }
+}
+
+async function runPlaceSearch() {
+  const query = document.getElementById('place-search').value.trim();
+  if(query.length < 2) {
+    renderSearchResults([]);
+    return;
+  }
+  await searchPlaces(query);
+  const first = document.querySelector('#search-results .search-item');
+  if(first) {
+    first.click();
+  } else {
+    document.getElementById('status-text').textContent = `No place found for "${query}"`;
+  }
 }
 
 function getShadowEllipsePixels() {
@@ -649,6 +770,34 @@ function detectWaterCoverage(canvas) {
   return opaque > 0 ? (waterLike / opaque) : 0;
 }
 
+function detectBuiltCoverage(canvas) {
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  const { width, height } = canvas;
+  if(!ctx || width < 4 || height < 4) return 0;
+
+  const sample = ctx.getImageData(0, 0, width, height).data;
+  let builtLike = 0;
+  let opaque = 0;
+
+  for(let i = 0; i < sample.length; i += 16) {
+    const r = sample[i];
+    const g = sample[i + 1];
+    const b = sample[i + 2];
+    const a = sample[i + 3];
+    if(a < 20) continue;
+    opaque++;
+    const max = Math.max(r, g, b);
+    const min = Math.min(r, g, b);
+    const brightness = (r + g + b) / 3;
+    const saturation = max === 0 ? 0 : (max - min) / max;
+    const neutralBright = brightness > 150 && saturation < 0.22;
+    const lightRoof = brightness > 130 && Math.abs(r - g) < 18 && Math.abs(g - b) < 18;
+    if(neutralBright || lightRoof) builtLike++;
+  }
+
+  return opaque > 0 ? (builtLike / opaque) : 0;
+}
+
 function applyVisualOverrides(data, context) {
   const result = JSON.parse(JSON.stringify(data));
   if(context.waterCoverage > 0.55) {
@@ -672,6 +821,58 @@ function applyVisualOverrides(data, context) {
   const densityScore = result.density?.score || 0;
   const densityClass = (result.density?.classification || '').toLowerCase();
   const sensitiveCount = result.sensitive_locations?.length || 0;
+  const zoneAreaHa = Number(result.shadow_zone_area_ha || 0);
+  const builtCoverage = context.builtCoverage || 0;
+
+  if (builtCoverage < 0.035 && context.waterCoverage < 0.12) {
+    result.building_count.total = 0;
+    result.building_count.residential = 0;
+    result.building_count.commercial = 0;
+    result.affected_population_estimate = 0;
+    result.density.score = Math.min(result.density.score || 2, 2.5);
+    result.density.classification = 'Rural';
+    result.land_use = result.vegetation_coverage === 'Low' ? 'Barren' : 'Agricultural';
+    result.risk_assessment.level = 'Low';
+    result.risk_assessment.score = Math.min(result.risk_assessment.score || 10, 12);
+    result.risk_assessment.factors = [
+      'Open agricultural or scrub land dominates the shadow flicker zone',
+      'No clearly visible buildings inside the selected area',
+      'Very low receptor exposure within the zone'
+    ];
+    result.sensitive_locations = [];
+    result.recommendation = 'This area appears largely undeveloped. Confirm site constraints with a field survey before proceeding.';
+    result.action_items = [
+      'Verify the site with a local ground survey',
+      'Check access, setbacks, and land ownership constraints',
+      'Review environmental and ecological sensitivities before construction'
+    ];
+    return result;
+  }
+
+  if (densityClass === 'urban' && zoneAreaHa >= 80 && buildingTotal > 0 && buildingTotal < 250) {
+    const estimatedTotal = Math.max(250, Math.round(zoneAreaHa * 9));
+    const residentialShare = buildingTotal > 0
+      ? (result.building_count.residential || 0) / buildingTotal
+      : 0.85;
+    result.building_count.total = estimatedTotal;
+    result.building_count.residential = Math.round(estimatedTotal * Math.min(0.95, Math.max(0.7, residentialShare || 0.85)));
+    result.building_count.commercial = Math.max(0, estimatedTotal - result.building_count.residential);
+    result.affected_population_estimate = Math.max(
+      result.affected_population_estimate || 0,
+      Math.round(estimatedTotal * 3.2)
+    );
+    result.risk_assessment.level = 'High';
+    result.risk_assessment.score = Math.max(result.risk_assessment.score, 96);
+    result.risk_assessment.factors = [
+      'Dense urban built-up area dominates the shadow flicker zone',
+      'Visual roof density indicates far more structures than the raw model count',
+      'This location presents severe shadow flicker exposure for urban receptors'
+    ];
+    result.recommendation = 'This dense urban location is unsuitable for turbine placement. Select a less built-up site.';
+    if(sensitiveCount === 0) {
+      result.sensitive_locations = ['Dense urban residential receptors throughout the zone'];
+    }
+  }
 
   // In obvious city-core scenarios, don't let the model understate the final score.
   if (
@@ -711,6 +912,7 @@ async function runAnalysis() {
     // Capture map screenshot
     let imageBase64 = null;
     let waterCoverage = 0;
+    let builtCoverage = 0;
     try {
       const mapEl = document.getElementById('map');
       const canvas = await html2canvas(mapEl, {
@@ -719,6 +921,7 @@ async function runAnalysis() {
       });
       const croppedCanvas = cropShadowRegion(canvas);
       waterCoverage = detectWaterCoverage(croppedCanvas);
+      builtCoverage = detectBuiltCoverage(croppedCanvas);
       imageBase64 = croppedCanvas.toDataURL('image/png').split(',')[1];
     } catch(e) {
       console.warn('Screenshot failed, using placeholder:', e);
@@ -747,7 +950,7 @@ async function runAnalysis() {
 
     if (!res.ok) throw new Error(`API error: ${res.status}`);
     const rawData = await res.json();
-    const data = applyVisualOverrides(rawData, { waterCoverage });
+    const data = applyVisualOverrides(rawData, { waterCoverage, builtCoverage });
 
     // Store in history
     const entry = {
@@ -1067,6 +1270,41 @@ L.ellipse = (latlng, radii, tilt, opts) => new L.Ellipse(latlng, radii, tilt, op
 // Init turbine spec display
 updateTurbine();
 updateShadowTime();
+
+const placeSearch = document.getElementById('place-search');
+const searchResults = document.getElementById('search-results');
+const searchBtn = document.getElementById('search-btn');
+
+placeSearch.addEventListener('input', () => {
+  const query = placeSearch.value.trim();
+  clearTimeout(searchTimer);
+  if(query.length < 2) {
+    renderSearchResults([]);
+    return;
+  }
+  searchTimer = setTimeout(() => searchPlaces(query), 220);
+});
+
+placeSearch.addEventListener('focus', () => {
+  if(searchResults.innerHTML.trim()) searchResults.classList.add('open');
+});
+
+placeSearch.addEventListener('keydown', (e) => {
+  if(e.key === 'Enter') {
+    e.preventDefault();
+    runPlaceSearch();
+  }
+});
+
+searchBtn.addEventListener('click', () => {
+  runPlaceSearch();
+});
+
+document.addEventListener('click', (e) => {
+  if(!e.target.closest('.header-search')) {
+    searchResults.classList.remove('open');
+  }
+});
 
 // Restore last history if exists
 if(history.length > 0) {
