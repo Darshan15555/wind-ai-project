@@ -531,8 +531,7 @@ function placeTurbine() {
 
 function drawShadowZone() {
   if(shadowEllipse) map.removeLayer(shadowEllipse);
-  const { centerLat, centerLng, radiusX, radiusY } = shadowGeometry();
-  const points = buildShadowPolygon(centerLat, centerLng, radiusX, radiusY);
+  const points = buildShadowPolygon(shadowGeometry());
   shadowEllipse = L.polygon(points, {
     color: '#f59e0b',
     fillColor: '#f59e0b',
@@ -556,34 +555,42 @@ function shadowGeometry() {
   const sunElevationDeg = 12 + 58 * easedArc;
   const sunElevationRad = sunElevationDeg * Math.PI / 180;
   const shadowLength = Math.max(20, height / Math.tan(sunElevationRad));
-  const radiusX = Math.max(30, shadowLength * 0.8);
-  const radiusY = Math.max(20, shadowLength * 0.3);
-  const direction = (shadowHour - 12) / 6;
-  const edgeBias = Math.abs(direction);
-  const offsetMeters = direction * radiusX * (0.1 + edgeBias * 0.9);
-  const lngOffset = offsetMeters / (111320 * Math.cos(turbineLat * Math.PI / 180));
+  const maxWidth = Math.max(20, shadowLength * 0.32);
+  const directionSign = shadowHour < 12 ? -1 : 1;
 
   return {
-    centerLat: turbineLat,
-    centerLng: turbineLng + lngOffset,
+    startLat: turbineLat,
+    startLng: turbineLng,
     shadowLength,
     sunElevationDeg,
-    radiusX,
-    radiusY
+    maxWidth,
+    directionSign
   };
 }
 
-function buildShadowPolygon(centerLat, centerLng, radiusX, radiusY) {
-  const points = [];
-  const cosLat = Math.cos(centerLat * Math.PI / 180);
-  for(let i = 0; i < 72; i++) {
-    const theta = (i / 72) * Math.PI * 2;
-    const dx = Math.cos(theta) * radiusX;
-    const dy = Math.sin(theta) * radiusY;
-    const lat = centerLat + (dy / 111320);
-    const lng = centerLng + (dx / (111320 * cosLat));
+function buildShadowPolygon({ startLat, startLng, shadowLength, maxWidth, directionSign }) {
+  const points = [[startLat, startLng]];
+  const cosLat = Math.cos(startLat * Math.PI / 180);
+  const segments = 48;
+
+  for(let i = 0; i <= segments; i++) {
+    const t = i / segments;
+    const x = shadowLength * t;
+    const width = Math.sin(Math.PI * t) * maxWidth;
+    const lat = startLat + (width / 111320);
+    const lng = startLng + ((directionSign * x) / (111320 * cosLat));
     points.push([lat, lng]);
   }
+
+  for(let i = segments; i >= 0; i--) {
+    const t = i / segments;
+    const x = shadowLength * t;
+    const width = Math.sin(Math.PI * t) * maxWidth;
+    const lat = startLat - (width / 111320);
+    const lng = startLng + ((directionSign * x) / (111320 * cosLat));
+    points.push([lat, lng]);
+  }
+
   return points;
 }
 
@@ -689,33 +696,28 @@ async function runPlaceSearch() {
   }
 }
 
-function getShadowEllipsePixels() {
-  const { centerLat, centerLng, radiusX, radiusY } = shadowGeometry();
-  const center = map.latLngToContainerPoint([centerLat, centerLng]);
-  const pointX = map.latLngToContainerPoint([
-    centerLat,
-    centerLng + radiusX / (111320 * Math.cos(centerLat * Math.PI / 180))
-  ]);
-  const pointY = map.latLngToContainerPoint([
-    centerLat + radiusY / 111320,
-    centerLng
-  ]);
+function getShadowZonePixels() {
+  const latLngPoints = buildShadowPolygon(shadowGeometry());
+  const pixelPoints = latLngPoints.map(([lat, lng]) => map.latLngToContainerPoint([lat, lng]));
+  const xs = pixelPoints.map(p => p.x);
+  const ys = pixelPoints.map(p => p.y);
 
   return {
-    cx: center.x,
-    cy: center.y,
-    rx: Math.abs(pointX.x - center.x),
-    ry: Math.abs(pointY.y - center.y)
+    points: pixelPoints,
+    left: Math.min(...xs),
+    top: Math.min(...ys),
+    right: Math.max(...xs),
+    bottom: Math.max(...ys)
   };
 }
 
 function cropShadowRegion(canvas) {
-  const { cx, cy, rx, ry } = getShadowEllipsePixels();
+  const zone = getShadowZonePixels();
   const padding = 24;
-  const left = Math.max(0, Math.floor(cx - rx - padding));
-  const top = Math.max(0, Math.floor(cy - ry - padding));
-  const right = Math.min(canvas.width, Math.ceil(cx + rx + padding));
-  const bottom = Math.min(canvas.height, Math.ceil(cy + ry + padding));
+  const left = Math.max(0, Math.floor(zone.left - padding));
+  const top = Math.max(0, Math.floor(zone.top - padding));
+  const right = Math.min(canvas.width, Math.ceil(zone.right + padding));
+  const bottom = Math.min(canvas.height, Math.ceil(zone.bottom + padding));
   const width = Math.max(1, right - left);
   const height = Math.max(1, bottom - top);
   const output = document.createElement('canvas');
@@ -728,7 +730,13 @@ function cropShadowRegion(canvas) {
 
   ctx.save();
   ctx.beginPath();
-  ctx.ellipse(cx - left, cy - top, rx, ry, 0, 0, Math.PI * 2);
+  zone.points.forEach((point, index) => {
+    const x = point.x - left;
+    const y = point.y - top;
+    if(index === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  });
+  ctx.closePath();
   ctx.clip();
   ctx.drawImage(canvas, left, top, width, height, 0, 0, width, height);
   ctx.restore();
@@ -737,7 +745,13 @@ function cropShadowRegion(canvas) {
   ctx.lineWidth = 3;
   ctx.setLineDash([10, 6]);
   ctx.beginPath();
-  ctx.ellipse(cx - left, cy - top, rx, ry, 0, 0, Math.PI * 2);
+  zone.points.forEach((point, index) => {
+    const x = point.x - left;
+    const y = point.y - top;
+    if(index === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  });
+  ctx.closePath();
   ctx.stroke();
 
   return output;
@@ -1001,10 +1015,10 @@ function renderDashboard(d, entry) {
     </div>
 
     <!-- Sensitive locations -->
-    <div class="sensitive-section">
-      <div class="section-title">Sensitive Locations</div>
-      <div class="sensitive-list">${sensHtml}</div>
-    </div>
+  <!--  <div class="sensitive-section">  -->
+ <!--     <div class="section-title">Sensitive Locations</div> -->
+ <!--     <div class="sensitive-list">${sensHtml}</div> -->
+ <!--   </div>-->
 
     <!-- Environment -->
     <div class="env-section">
